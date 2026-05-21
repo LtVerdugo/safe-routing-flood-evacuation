@@ -1,0 +1,15 @@
+# Data files (too large for GitHub)
+datasets/
+
+# Python environment
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# VS Code
+.vscode/
+
+# OS files
+.DS_Store
+Thumbs.db

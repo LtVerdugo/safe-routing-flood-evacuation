@@ -1,0 +1,7 @@
+flask
+geopandas
+networkx
+shapely
+pyproj
+numpy
+scipy
