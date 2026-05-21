@@ -69,9 +69,20 @@ server {
 }
 ```
 
-### Note on dataset files
+### Dataset files
 The dataset files are not included in this repository due to their size (~476MB).
-Contact the authors to obtain the Brandenburg dataset.
+Download the Brandenburg dataset from Google Drive and place it under `datasets/brandenburg/`:
+
+[Download dataset →](https://drive.google.com/drive/folders/10sW6YThdI_08FfQj6Mug9D2-thbJdlkx?usp=sharing)
+
+Expected structure:
+```
+datasets/
+└── brandenburg/
+    ├── G.pkl
+    ├── buildings.geojson
+    └── flood.geojson
+```
 
 ## Data sources
 - Flood extent: Copernicus Emergency Management Service — EMSN068 Brandenburg
