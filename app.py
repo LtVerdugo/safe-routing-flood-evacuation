@@ -16,7 +16,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 import cache
 
-app = Flask(__name__)
+app = Flask(__name__, template_folder='static')
 
 _BASE_DIR = str(Path(__file__).parent / "datasets")
 
