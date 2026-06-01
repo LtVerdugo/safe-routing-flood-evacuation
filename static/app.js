@@ -1,3 +1,13 @@
+const APP_BASE = (() => {
+  const path = window.location.pathname.replace(/\/index\.html$/, "");
+  const staticIndex = path.indexOf("/static");
+  if (staticIndex >= 0) return path.slice(0, staticIndex).replace(/\/$/, "");
+  return path.replace(/\/$/, "");
+})();
+
+const API_BASE = (window.FLOOD_ROUTING_API_BASE || `${APP_BASE}/api`).replace(/\/$/, "");
+const apiUrl = (path) => `${API_BASE}/${path.replace(/^\/+/, "")}`;
+
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
@@ -274,8 +284,8 @@ async function loadDataset(name) {
 
   try {
     const [floodGeoJSON, bboxData] = await Promise.all([
-      fetchJson(`/api/flood?dataset=${encodeURIComponent(name)}`),
-      fetchJson(`/api/bbox?dataset=${encodeURIComponent(name)}`)
+      fetchJson(apiUrl(`flood?dataset=${encodeURIComponent(name)}`)),
+      fetchJson(apiUrl(`bbox?dataset=${encodeURIComponent(name)}`))
     ]);
 
     const [minx, miny, maxx, maxy] = bboxData.bbox;
@@ -304,12 +314,12 @@ async function loadDataset(name) {
     }
 
     setRouteStatus('Loading buildings…');
-    const buildingsGeoJSON = await fetchJson(`/api/buildings?dataset=${encodeURIComponent(name)}`);
+    const buildingsGeoJSON = await fetchJson(apiUrl(`buildings?dataset=${encodeURIComponent(name)}`));
 
     renderBuildings(buildingsGeoJSON);
 
     // Load flooded road segments
-    const floodedData = await fetchJson(`/api/flooded_segments?dataset=${encodeURIComponent(name)}`);
+    const floodedData = await fetchJson(apiUrl(`flooded_segments?dataset=${encodeURIComponent(name)}`));
 
     if (floodedSegmentsLayer) map.removeLayer(floodedSegmentsLayer);
     floodedSegmentsLayer = L.geoJSON(floodedData, {
@@ -352,7 +362,7 @@ async function computeRoute(fromBid, toBid) {
   setRouteStatus('Calculating route…');
 
   try {
-    let url = `/api/route?dataset=${encodeURIComponent(currentDataset)}&from=${encodeURIComponent(fromBid)}`;
+    let url = apiUrl(`route?dataset=${encodeURIComponent(currentDataset)}&from=${encodeURIComponent(fromBid)}`);
     if (toBid) url += `&to=${encodeURIComponent(toBid)}`;
 
     const data = await fetchJson(url);
@@ -515,7 +525,7 @@ document.getElementById('btn-clear').addEventListener('click', function () {
 
 async function init() {
   try {
-    const data   = await fetchJson('/api/datasets');
+    const data   = await fetchJson(apiUrl('datasets'));
     const select = document.getElementById('dataset-select');
 
     for (const name of data.datasets) {

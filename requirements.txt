@@ -6,3 +6,4 @@ pyproj
 numpy
 scipy
 gunicorn
+pyarrow>=15.0

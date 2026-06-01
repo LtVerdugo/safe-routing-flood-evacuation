@@ -1,5 +1,6 @@
 import heapq
 import math
+import os
 import sys
 from pathlib import Path
 from shapely import wkt as shapely_wkt
@@ -8,7 +9,7 @@ import numpy as np
 from scipy.spatial import KDTree
 
 import networkx as nx
-from flask import Flask, Response, jsonify, render_template, request
+from flask import Flask, Response, jsonify, send_from_directory, request
 from pyproj import Transformer
 
 # Ensure pipeline and cache are importable when run from any directory
@@ -16,7 +17,34 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 import cache
 
-app = Flask(__name__, template_folder='static')
+PUBLIC_BASE_PATH = os.environ.get("PUBLIC_BASE_PATH", "").strip()
+if PUBLIC_BASE_PATH and not PUBLIC_BASE_PATH.startswith("/"):
+    PUBLIC_BASE_PATH = f"/{PUBLIC_BASE_PATH}"
+PUBLIC_BASE_PATH = PUBLIC_BASE_PATH.rstrip("/")
+if PUBLIC_BASE_PATH == "/":
+    PUBLIC_BASE_PATH = ""
+
+app = Flask(
+    __name__,
+    template_folder='static',
+    static_url_path=(
+        f"{PUBLIC_BASE_PATH}/static" if PUBLIC_BASE_PATH else "/static"
+    ),
+)
+app.config["APPLICATION_ROOT"] = PUBLIC_BASE_PATH or "/"
+
+
+def app_route(rule: str, **options):
+    """Register a route with an optional public URL prefix alias."""
+    def decorator(func):
+        app.route(rule, **options)(func)
+        if PUBLIC_BASE_PATH:
+            app.route(f"{PUBLIC_BASE_PATH}{rule}", **options)(func)
+            if rule == "/":
+                app.route(PUBLIC_BASE_PATH, **options)(func)
+        return func
+    return decorator
+
 
 _BASE_DIR = str(Path(__file__).parent / "datasets")
 
@@ -265,17 +293,17 @@ def find_emergency_route(G, from_bid, kdtree=None, safe_bids=None):
 # Routes
 # ---------------------------------------------------------------------------
 
-@app.route("/")
+@app_route("/")
 def index():
-    return render_template("index.html")
+    return send_from_directory(app.static_folder, "index.html")
 
 
-@app.route("/api/datasets")
+@app_route("/api/datasets")
 def api_datasets():
     return jsonify({"datasets": cache.list_datasets()})
 
 
-@app.route("/api/buildings")
+@app_route("/api/buildings")
 def api_buildings():
     ds, err = _require_dataset()
     if err:
@@ -283,7 +311,7 @@ def api_buildings():
     return Response(ds["buildings_geojson"], mimetype="application/json")
 
 
-@app.route("/api/flood")
+@app_route("/api/flood")
 def api_flood():
     ds, err = _require_dataset()
     if err:
@@ -291,7 +319,7 @@ def api_flood():
     return Response(ds["flood_geojson"], mimetype="application/json")
 
 
-@app.route("/api/bbox")
+@app_route("/api/bbox")
 def api_bbox():
     ds, err = _require_dataset()
     if err:
@@ -299,7 +327,7 @@ def api_bbox():
     return jsonify({"bbox": ds["bbox"]})
 
 
-@app.route("/api/flooded_segments")
+@app_route("/api/flooded_segments")
 def api_flooded_segments():
     ds, err = _require_dataset()
     if err:
@@ -324,7 +352,7 @@ def api_flooded_segments():
     return jsonify({"type": "FeatureCollection", "features": features})
 
 
-@app.route("/api/route")
+@app_route("/api/route")
 def api_route():
     try:
         ds, err = _require_dataset()
@@ -437,6 +465,11 @@ def api_route():
     except Exception as e:
         app.logger.exception("Error in /api/route: %s", e)
         return jsonify({"error": str(e)}), 500
+
+
+@app_route("/healthz")
+def healthz():
+    return jsonify({"ok": True})
 
 
 if __name__ == "__main__":
