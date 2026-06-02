@@ -1,12 +1,9 @@
-const APP_BASE = (() => {
-  const path = window.location.pathname.replace(/\/index\.html$/, "");
-  const staticIndex = path.indexOf("/static");
-  if (staticIndex >= 0) return path.slice(0, staticIndex).replace(/\/$/, "");
-  return path.replace(/\/$/, "");
+const STATIC_BASE = (() => {
+  const p = window.location.pathname.replace(/\/index\.html$/, "");
+  const idx = p.indexOf("/static");
+  return idx >= 0 ? p.slice(0, idx + "/static".length) : "/static";
 })();
-
-const API_BASE = (window.FLOOD_ROUTING_API_BASE || `${APP_BASE}/api`).replace(/\/$/, "");
-const apiUrl = (path) => `${API_BASE}/${path.replace(/^\/+/, "")}`;
+const DATA_BASE = `${STATIC_BASE}/data`;
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -63,18 +60,17 @@ L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}' + (L.Brows
 // Application state
 // ---------------------------------------------------------------------------
 
-let currentDataset        = null;
-let floodLayer            = null;   // L.geoJSON flood polygon layer
-let buildingsLayer        = null;   // L.geoJSON building polygon layer
-let floodedSegmentsLayer  = null;   // L.geoJSON flooded road segments layer
-let routePolylines        = [];     // array of active L.polyline instances
-let currentColorMode      = true;   // true = color by flood_status, false = uniform blue
+let floodLayer           = null;
+let buildingsLayer       = null;
+let floodedSegmentsLayer = null;
+let currentColorMode     = true;
 
-let selectionMode      = 'origin';  // 'origin' | 'dest' | null
-let originBid          = null;
-let destBid            = null;
-let originHighlightBid = null;
-let destHighlightBid   = null;
+let safeRouteData        = null;
+let directRouteData      = null;
+let safeRoutePolylines   = [];
+let directRoutePolylines = [];
+let safeRouteVisible     = false;
+let directRouteVisible   = false;
 
 // ---------------------------------------------------------------------------
 // Utility helpers
@@ -96,143 +92,29 @@ function getBuildingCenter(bid) {
   return layer ? layer.getBounds().getCenter() : null;
 }
 
-function highlightBuilding(bid, borderColor) {
-  const layer = _findBuildingLayer(bid);
-  if (!layer) return;
-  if (borderColor) {
-    layer.setStyle({ color: borderColor, weight: 2.5, opacity: 1 });
-  } else {
-    layer.setStyle(getBuildingStyle(layer.feature));
-  }
-}
-
-/** Remove all route polylines from the map and reset the list. */
-function clearRoute() {
-  for (const polyline of routePolylines) {
-    map.removeLayer(polyline);
-  }
-  routePolylines = [];
-  if (originHighlightBid) { highlightBuilding(originHighlightBid, null); originHighlightBid = null; }
-  if (destHighlightBid)   { highlightBuilding(destHighlightBid,   null); destHighlightBid   = null; }
-  updateSlotStyle('origin', 'default');
-  updateSlotStyle('dest', 'default');
-  document.getElementById('result-section').style.display = 'none';
-  document.getElementById('directions-list').innerHTML = '';
-  setRouteStatus('');
-  setSelectionMode('origin');
-  updatePanelState();
-}
-
-function setRouteStatus(html) {
+function setStatus(html) {
   document.getElementById('route-status').innerHTML = html;
 }
 
-function _getInputEl(which) {
-  return document.getElementById(which === 'origin' ? 'origin-input' : 'dest-input');
+function updateClearButton() {
+  const anyVisible = safeRouteVisible || directRouteVisible;
+  document.getElementById('btn-clear').style.display = anyVisible ? 'block' : 'none';
 }
 
-function resetInput(which) {
-  _getInputEl(which).value = '';
-  if (which === 'origin') originBid = null;
-  else destBid = null;
-  updatePanelState();
-}
-
-function setInputFilled(which, bid) {
-  _getInputEl(which).value = bid;
-  if (which === 'origin') originBid = bid;
-  else destBid = bid;
-  updatePanelState();
-}
-
-function setSelectionMode(mode) {
-  selectionMode = mode;
-  map.getContainer().style.cursor = (mode === 'origin' || mode === 'dest') ? 'crosshair' : '';
-  if (mode === 'origin') setRouteStatus('Click a building to set origin');
-  else if (mode === 'dest') setRouteStatus('Click a building to set destination');
-}
-
-function updatePanelState() {
-  const hasOrigin      = !!originBid;
-  const hasDestination = !!destBid;
-  document.getElementById('btn-emergency').style.display =
-    hasOrigin && !hasDestination ? 'block' : 'none';
-  document.getElementById('btn-route').style.display =
-    hasOrigin && hasDestination ? 'block' : 'none';
-  document.getElementById('btn-clear').style.display =
-    hasOrigin ? 'block' : 'none';
-}
-
-function updateSlotStyle(which, status) {
-  const slot   = document.getElementById(which === 'origin' ? 'origin-slot' : 'dest-slot');
-  const colors = SLOT_COLORS[status] || SLOT_COLORS.default;
-  slot.style.borderLeftColor = colors.border;
-  slot.style.background      = colors.bg;
-  const dot = slot.querySelector('.slot-dot');
-  if (dot) dot.style.background = colors.border;
-}
-
-function renderDirections(directions) {
-  const list = document.getElementById('directions-list');
-  list.innerHTML = '';
-  directions.forEach((step, i) => {
-    const icon = step.action === 'start'
-      ? (HEADING_ARROWS[step.heading] || '↑')
-      : (DIRECTION_ICONS[step.action] || '↑');
-    let label = '';
-
-    if (step.action === 'start') {
-      label = `Head ${step.heading}`;
-    } else if (step.action === 'turn_right') {
-      label = `In ${step.distance_m} m, turn right`;
-    } else if (step.action === 'turn_left') {
-      label = `In ${step.distance_m} m, turn left`;
-    } else if (step.action === 'arriving') {
-      label = `In ${step.distance_m} m, you will arrive at your destination`;
-    } else if (step.action === 'arrive') {
-      const sideText = step.side ? ` — building is on your ${step.side}` : '';
-      label = `You have arrived at your destination${sideText}`;
-    }
-
-    const item = document.createElement('div');
-    item.className = 'turn-item' + (step.action === 'arrive' ? ' turn-arrive' : '');
-    item.innerHTML = `
-      <div class="turn-text">${label}</div>
-      <div class="turn-icon">${icon}</div>`;
-
-    list.appendChild(item);
-  });
-}
-
-function renderResult(data) {
-  document.getElementById('result-section').style.display = 'block';
-
-  document.getElementById('stat-distance').querySelector('.stat-val').textContent =
-    Math.round(data.total_cost) + ' m';
-
-  const floodedEl = document.getElementById('stat-flooded').querySelector('.stat-val');
-  floodedEl.textContent  = data.flooded_segments;
-  floodedEl.style.color  = data.flooded_segments === 0 ? '#1a9850' : '#d73027';
-
-  document.getElementById('stat-segments').querySelector('.stat-val').textContent =
-    data.road_segments;
-
-  if (data.to_status) updateSlotStyle('dest', data.to_status);
-
-  if (data.directions) renderDirections(data.directions);
-}
-
-/**
- * Fetch a URL, parse JSON, and throw a meaningful Error on HTTP failure.
- * Always reads the response body so the error message from the API is surfaced.
- */
-async function fetchJson(url) {
-  const res  = await fetch(url);
-  const data = await res.json();
-  if (!res.ok) {
-    throw new Error(data.error || `HTTP ${res.status}`);
+function clearRoutes() {
+  if (safeRoutePolylines._animTimeout) {
+    clearTimeout(safeRoutePolylines._animTimeout);
   }
-  return data;
+  [...safeRoutePolylines, ...directRoutePolylines].forEach(p => {
+    if (map.hasLayer(p)) map.removeLayer(p);
+  });
+  safeRoutePolylines = [];
+  directRoutePolylines = [];
+  safeRouteVisible = false;
+  directRouteVisible = false;
+  document.getElementById('result-safe').style.display   = 'none';
+  document.getElementById('result-direct').style.display = 'none';
+  updateClearButton();
 }
 
 // ---------------------------------------------------------------------------
@@ -259,203 +141,269 @@ function renderBuildings(geojson) {
     style:    getBuildingStyle,
     renderer: L.canvas(),
     onEachFeature: function (feature, layer) {
-      layer.on('click', function () {
-        onBuildingSelected(feature.properties.bid, feature.properties.flood_status);
-      });
+      layer.on('click', function () {});
     },
   }).addTo(map);
 }
 
-// ---------------------------------------------------------------------------
-// Dataset loading
-// ---------------------------------------------------------------------------
+function renderDirections(directions, container) {
+  container.innerHTML = '';
+  directions.forEach((step, i) => {
+    const icon = step.action === 'start'
+      ? (HEADING_ARROWS[step.heading] || '↑')
+      : (DIRECTION_ICONS[step.action] || '↑');
+    let label = '';
 
-async function loadDataset(name) {
-  currentDataset = name;
-
-  clearRoute();
-  resetInput('origin');
-  resetInput('dest');
-  if (floodLayer)            { map.removeLayer(floodLayer);               floodLayer            = null; }
-  if (buildingsLayer)        { map.removeLayer(buildingsLayer);            buildingsLayer        = null; }
-  if (floodedSegmentsLayer)  { map.removeLayer(floodedSegmentsLayer);      floodedSegmentsLayer  = null; }
-
-  setRouteStatus('Loading flood polygons…');
-
-  try {
-    const [floodGeoJSON, bboxData] = await Promise.all([
-      fetchJson(apiUrl(`flood?dataset=${encodeURIComponent(name)}`)),
-      fetchJson(apiUrl(`bbox?dataset=${encodeURIComponent(name)}`))
-    ]);
-
-    const [minx, miny, maxx, maxy] = bboxData.bbox;
-    const pad = 0.5;
-    map.setMaxBounds([[miny - pad, minx - pad], [maxy + pad, maxx + pad]]);
-    map.setMinZoom(9);
-    const centerLat = (miny + maxy) / 2;
-    const centerLon = (minx + maxx) / 2;
-    map.setView([centerLat, centerLon], 14);
-
-    floodLayer = L.vectorGrid.slicer(floodGeoJSON, {
-      rendererFactory: L.svg.tile,
-      vectorTileLayerStyles: {
-        sliced: {
-          fillColor: '#1E90FF',
-          fillOpacity: 0.4,
-          stroke: false,
-          fill: true
-        }
-      },
-      interactive: false,
-      maxZoom: 20
-    });
-    if (document.getElementById('toggle-flood').checked) {
-      floodLayer.addTo(map);
+    if (step.action === 'start') {
+      label = `Head ${step.heading}`;
+    } else if (step.action === 'turn_right') {
+      label = `In ${step.distance_m} m, turn right`;
+    } else if (step.action === 'turn_left') {
+      label = `In ${step.distance_m} m, turn left`;
+    } else if (step.action === 'arriving') {
+      label = `In ${step.distance_m} m, you will arrive at your destination`;
+    } else if (step.action === 'arrive') {
+      const sideText = step.side ? ` — building is on your ${step.side}` : '';
+      label = `You have arrived at your destination${sideText}`;
     }
 
-    setRouteStatus('Loading buildings…');
-    const buildingsGeoJSON = await fetchJson(apiUrl(`buildings?dataset=${encodeURIComponent(name)}`));
+    const item = document.createElement('div');
+    item.className = 'turn-item' + (step.action === 'arrive' ? ' turn-arrive' : '');
+    item.innerHTML = `
+      <div class="turn-text">${label}</div>
+      <div class="turn-icon">${icon}</div>`;
 
-    renderBuildings(buildingsGeoJSON);
+    container.appendChild(item);
+  });
+}
 
-    // Load flooded road segments
-    const floodedData = await fetchJson(apiUrl(`flooded_segments?dataset=${encodeURIComponent(name)}`));
-
-    if (floodedSegmentsLayer) map.removeLayer(floodedSegmentsLayer);
-    floodedSegmentsLayer = L.geoJSON(floodedData, {
-      style: { color: '#d73027', weight: 2, opacity: 0.8 }
-    });
-    if (document.getElementById('toggle-flooded-segments').checked) {
-      floodedSegmentsLayer.addTo(map);
-    }
-
-    setSelectionMode('origin');
-  } catch (err) {
-    setRouteStatus(`<span style="color:red">Error loading dataset: ${err.message}</span>`);
-  }
+function renderResult(data, resultId) {
+  const section = document.getElementById(resultId);
+  section.style.display = 'block';
+  section.querySelector('.stat-distance .stat-val').textContent = Math.round(data.total_cost) + ' m';
+  const flEl = section.querySelector('.stat-flooded .stat-val');
+  flEl.textContent = data.flooded_segments;
+  flEl.style.color = data.flooded_segments === 0 ? '#1a9850' : '#d73027';
+  section.querySelector('.stat-segments .stat-val').textContent = data.road_segments;
+  renderDirections(data.directions, section.querySelector('.directions-list'));
 }
 
 // ---------------------------------------------------------------------------
-// Routing
+// Route toggling
 // ---------------------------------------------------------------------------
 
-function onBuildingSelected(bid, floodStatus) {
-  const originVal = document.getElementById('origin-input').value.trim();
-  if (!originVal) {
-    setInputFilled('origin', bid);
-    clearRoute();
-    resetInput('dest');
-    if (floodStatus) updateSlotStyle('origin', floodStatus);
-    setSelectionMode('dest');
-  } else {
-    if (bid === originBid) return;
-    setInputFilled('dest', bid);
-    setSelectionMode(null);
-    computeRoute(originBid, bid);
+async function toggleRoute(type) {
+  const isVisible = type === 'safe' ? safeRouteVisible  : directRouteVisible;
+  const polylines = type === 'safe' ? safeRoutePolylines : directRoutePolylines;
+  const color     = type === 'safe' ? '#2563eb' : '#1a1a1a';
+  const jsonFile  = type === 'safe' ? 'route_safe.json' : 'route_direct.json';
+  const resultId  = type === 'safe' ? 'result-safe' : 'result-direct';
+
+  if (isVisible) {
+    if (type === 'safe' && safeRoutePolylines._animTimeout) {
+      clearTimeout(safeRoutePolylines._animTimeout);
+    }
+    polylines.forEach(p => { if (map.hasLayer(p)) map.removeLayer(p); });
+    if (type === 'safe') { safeRoutePolylines = []; safeRouteVisible = false; }
+    else                 { directRoutePolylines = []; directRouteVisible = false; }
+    document.getElementById(resultId).style.display = 'none';
+    updateClearButton();
+    return;
   }
-  updatePanelState();
-}
 
-async function computeRoute(fromBid, toBid) {
-  if (!currentDataset) return;
-  clearRoute();
-  setRouteStatus('Calculating route…');
+  let data = type === 'safe' ? safeRouteData : directRouteData;
+  if (!data) {
+    setStatus(`Loading ${type} route…`);
+    data = await fetch(`${DATA_BASE}/${jsonFile}`).then(r => r.json());
+    if (type === 'safe') safeRouteData = data;
+    else                 directRouteData = data;
+    setStatus('');
+  }
 
-  try {
-    let url = apiUrl(`route?dataset=${encodeURIComponent(currentDataset)}&from=${encodeURIComponent(fromBid)}`);
-    if (toBid) url += `&to=${encodeURIComponent(toBid)}`;
+  const newPolylines = [];
+  const srcCenter = getBuildingCenter(data.from);
+  const dstCenter = getBuildingCenter(data.to);
 
-    const data = await fetchJson(url);
-
-    if (!data.found) {
-      setRouteStatus(`<strong>No route found</strong><br>${data.reason}`);
-      return;
+  if (type === 'safe') {
+    // Paso 1 — extraer segmentos como arrays de [lat,lon]
+    const segments = [];
+    for (const feature of data.path_geojson.features) {
+      if (!feature.geometry?.coordinates) continue;
+      const coords = feature.geometry.coordinates.map(([lon, lat]) => [lat, lon]);
+      if (coords.length >= 2) segments.push(coords);
     }
 
-    setRouteStatus('');
-    renderResult(data);
+    // Paso 2 — orientar cada segmento para que empiece donde termina el anterior
+    for (let i = 1; i < segments.length; i++) {
+      const prevEnd   = segments[i-1].at(-1);
+      const currStart = segments[i][0];
+      const currEnd   = segments[i].at(-1);
+      const distStart = Math.abs(currStart[0]-prevEnd[0]) + Math.abs(currStart[1]-prevEnd[1]);
+      const distEnd   = Math.abs(currEnd[0]-prevEnd[0])   + Math.abs(currEnd[1]-prevEnd[1]);
+      if (distEnd < distStart) segments[i] = [...segments[i]].reverse();
+    }
 
-    originHighlightBid = fromBid;
-    destHighlightBid   = data.to;
-    highlightBuilding(fromBid,  '#1a9850');
-    highlightBuilding(data.to,  '#d73027');
+    // Paso 3 — concatenar en un único array continuo
+    const allCoords = segments.flat();
 
-    if (data.path_geojson && data.path_geojson.features.length > 0) {
-      const features = data.path_geojson.features;
+    // Paso 2 — fase 1: dibujado progresivo con L.motion.polyline (0–3000ms)
+    const motionLine = L.motion.polyline(
+      allCoords,
+      { color: '#2563eb', weight: 5, opacity: 0.9 },
+      { auto: true, duration: 3000, easing: L.Motion.Ease.easeInOutQuart },
+      { removeOnEnd: false, showMarker: false }
+    ).addTo(map);
+    newPolylines.push(motionLine);
 
-      for (const feature of features) {
-        if (!feature.geometry || !feature.geometry.coordinates) continue;
+    // Líneas amarillas punteadas de acceso
+    if (srcCenter && data.access_from) {
+      const af = [data.access_from.coordinates[1], data.access_from.coordinates[0]];
+      newPolylines.push(L.polyline([srcCenter, af], { color: '#f0c808', weight: 3, dashArray: '8,8', opacity: 0.9 }).addTo(map));
+    }
+    if (dstCenter && data.access_to) {
+      const at = [data.access_to.coordinates[1], data.access_to.coordinates[0]];
+      newPolylines.push(L.polyline([at, dstCenter], { color: '#f0c808', weight: 3, dashArray: '8,8', opacity: 0.9 }).addTo(map));
+    }
 
-        const latlngs = feature.geometry.coordinates.map(([lon, lat]) => [lat, lon]);
-        const color   = feature.properties.flooded ? '#d73027' : '#2563eb';
+    // Marcador origen (▶ verde)
+    if (srcCenter) newPolylines.push(L.marker(srcCenter, { icon: L.divIcon({
+      className: 'route-marker-origin',
+      html: '<div style="background:#1a9850;color:white;border-radius:50%;width:28px;height:28px;display:flex;align-items:center;justify-content:center;font-size:14px;border:2px solid white;box-shadow:0 2px 6px rgba(0,0,0,0.3)">▶</div>',
+      iconSize: [28, 28], iconAnchor: [14, 14]
+    })}).addTo(map));
 
-        const polyline = L.polyline(latlngs, { color, weight: 4 }).addTo(map);
-        routePolylines.push(polyline);
-      }
+    // Zoom automático usando allCoords
+    if (allCoords.length > 0) {
+      let bounds = L.latLngBounds(allCoords);
+      if (srcCenter) bounds.extend(srcCenter);
+      if (dstCenter) bounds.extend(dstCenter);
+      map.fitBounds(bounds, { padding: [50, 50] });
+    }
 
-      const originCenter = getBuildingCenter(fromBid);
-      const destCenter   = getBuildingCenter(data.to);
+    // Paso 3 — fase 2 y 3: al terminar los 3000ms
+    const safeAnimTimeout = setTimeout(() => {
+      if (map.hasLayer(motionLine)) map.removeLayer(motionLine);
+      const idx = newPolylines.indexOf(motionLine);
+      if (idx > -1) newPolylines.splice(idx, 1);
 
-      // Yellow dashed access lines using backend-provided access node coordinates
-      if (originCenter && data.access_from) {
-        const accessFromPoint = [data.access_from.coordinates[1], data.access_from.coordinates[0]];
-        routePolylines.push(
-          L.polyline([originCenter, accessFromPoint], {
-            color: '#f0c808', weight: 3, dashArray: '8, 8', opacity: 0.9
-          }).addTo(map)
-        );
-      }
-      if (destCenter && data.access_to) {
-        const accessToPoint = [data.access_to.coordinates[1], data.access_to.coordinates[0]];
-        routePolylines.push(
-          L.polyline([accessToPoint, destCenter], {
-            color: '#f0c808', weight: 3, dashArray: '8, 8', opacity: 0.9
-          }).addTo(map)
-        );
-      }
+      // Fase 2 — antPath con flujo animado
+      const antLine = L.polyline.antPath(allCoords, {
+        delay: 800,
+        dashArray: [10, 20],
+        weight: 5,
+        color: '#2563eb',
+        pulseColor: '#ffffff',
+        opacity: 0.9,
+        hardwareAccelerated: true,
+      }).addTo(map);
+      newPolylines.push(antLine);
 
-      // Origin marker (green play)
-      if (originCenter) {
-        routePolylines.push(
-          L.marker(originCenter, {
-            icon: L.divIcon({
-              className: 'route-marker-origin',
-              html: '<div style="background:#1a9850;color:white;border-radius:50%;width:28px;height:28px;display:flex;align-items:center;justify-content:center;font-size:14px;border:2px solid white;box-shadow:0 2px 6px rgba(0,0,0,0.3)">▶</div>',
-              iconSize: [28, 28],
-              iconAnchor: [14, 14]
-            })
-          }).addTo(map)
-        );
-      }
-
-      // Destination marker (red pin)
-      if (destCenter) {
-        routePolylines.push(
-          L.marker(destCenter, {
-            icon: L.divIcon({
-              className: 'route-marker-dest',
-              html: '<div style="background:#d73027;color:white;border-radius:50% 50% 50% 0;width:28px;height:28px;display:flex;align-items:center;justify-content:center;font-size:12px;border:2px solid white;box-shadow:0 2px 6px rgba(0,0,0,0.3);transform:rotate(-45deg)"><span style="transform:rotate(45deg);display:block">📍</span></div>',
-              iconSize: [28, 28],
-              iconAnchor: [14, 28]
-            })
-          }).addTo(map)
-        );
-      }
-
-      // Auto-zoom to fit entire route and both buildings
-      if (originCenter && destCenter) {
-        let routeBounds = L.latLngBounds([originCenter, destCenter]);
-        routePolylines.forEach(function(layer) {
-          if (typeof layer.getBounds === 'function') {
-            routeBounds.extend(layer.getBounds());
-          }
+      // Fase 3 — pin destino con círculo pulsante
+      if (dstCenter) {
+        const pulseIcon = L.divIcon({
+          className: '',
+          html: `
+            <div style="position:relative;width:40px;height:40px;">
+              <div class="pulse-ring"></div>
+              <div style="position:absolute;top:50%;left:50%;
+                   background:#d73027;color:white;border-radius:50% 50% 50% 0;
+                   width:28px;height:28px;display:flex;align-items:center;justify-content:center;
+                   font-size:12px;border:2px solid white;box-shadow:0 2px 6px rgba(0,0,0,0.3);
+                   transform:translate(-50%,-50%) rotate(-45deg);">
+                <span style="transform:rotate(45deg);display:block">📍</span>
+              </div>
+            </div>`,
+          iconSize: [40, 40],
+          iconAnchor: [20, 36]
         });
-        map.fitBounds(routeBounds, { padding: [50, 50] });
+        const destMarker = L.marker(dstCenter, { icon: pulseIcon }).addTo(map);
+        newPolylines.push(destMarker);
       }
+    }, 3000);
+
+    safeRoutePolylines = newPolylines;
+    safeRoutePolylines._animTimeout = safeAnimTimeout;
+    safeRouteVisible = true;
+
+  } else {
+    // type === 'direct' — sin cambios
+    for (const feature of data.path_geojson.features) {
+      if (!feature.geometry?.coordinates) continue;
+      const latlngs = feature.geometry.coordinates.map(([lon, lat]) => [lat, lon]);
+      const segColor = feature.properties.flooded ? '#d73027' : color;
+      newPolylines.push(L.polyline(latlngs, { color: segColor, weight: 5 }).addTo(map));
     }
-  } catch (err) {
-    setRouteStatus(`<span style="color:red">Error: ${err.message}</span>`);
+
+    if (srcCenter && data.access_from) {
+      const af = [data.access_from.coordinates[1], data.access_from.coordinates[0]];
+      newPolylines.push(L.polyline([srcCenter, af], { color: '#f0c808', weight: 3, dashArray: '8,8', opacity: 0.9 }).addTo(map));
+    }
+    if (dstCenter && data.access_to) {
+      const at = [data.access_to.coordinates[1], data.access_to.coordinates[0]];
+      newPolylines.push(L.polyline([at, dstCenter], { color: '#f0c808', weight: 3, dashArray: '8,8', opacity: 0.9 }).addTo(map));
+    }
+
+    if (srcCenter) newPolylines.push(L.marker(srcCenter, { icon: L.divIcon({
+      className: 'route-marker-origin',
+      html: '<div style="background:#1a9850;color:white;border-radius:50%;width:28px;height:28px;display:flex;align-items:center;justify-content:center;font-size:14px;border:2px solid white;box-shadow:0 2px 6px rgba(0,0,0,0.3)">▶</div>',
+      iconSize: [28, 28], iconAnchor: [14, 14]
+    })}).addTo(map));
+
+    if (dstCenter) newPolylines.push(L.marker(dstCenter, { icon: L.divIcon({
+      className: 'route-marker-dest',
+      html: '<div style="background:#d73027;color:white;border-radius:50% 50% 50% 0;width:28px;height:28px;display:flex;align-items:center;justify-content:center;font-size:12px;border:2px solid white;box-shadow:0 2px 6px rgba(0,0,0,0.3);transform:rotate(-45deg)"><span style="transform:rotate(45deg);display:block">📍</span></div>',
+      iconSize: [28, 28], iconAnchor: [14, 28]
+    })}).addTo(map));
+
+    const boundsArr = newPolylines
+      .filter(l => typeof l.getBounds === 'function')
+      .map(l => l.getBounds());
+    let bounds = boundsArr.length > 0
+      ? boundsArr.slice(1).reduce((acc, b) => acc.extend(b), boundsArr[0])
+      : null;
+    if (srcCenter) bounds = bounds ? bounds.extend(srcCenter) : L.latLngBounds([srcCenter, srcCenter]);
+    if (dstCenter) bounds = bounds ? bounds.extend(dstCenter) : L.latLngBounds([dstCenter, dstCenter]);
+    if (bounds) map.fitBounds(bounds, { padding: [50, 50] });
+
+    directRoutePolylines = newPolylines;
+    directRouteVisible = true;
   }
+
+  renderResult(data, resultId);
+  updateClearButton();
+}
+
+// ---------------------------------------------------------------------------
+// Initialisation
+// ---------------------------------------------------------------------------
+
+async function init() {
+  setStatus('Loading map data…');
+  const [buildingsGeoJSON, floodGeoJSON, floodedData, routeMeta] = await Promise.all([
+    fetch(`${DATA_BASE}/buildings.geojson`).then(r => r.json()),
+    fetch(`${DATA_BASE}/flood.geojson`).then(r => r.json()),
+    fetch(`${DATA_BASE}/flooded_segments.geojson`).then(r => r.json()),
+    fetch(`${DATA_BASE}/route_safe.json`).then(r => r.json()),
+  ]);
+
+  const [minx, miny, maxx, maxy] = routeMeta.bbox;
+  map.fitBounds([[miny, minx], [maxy, maxx]]);
+
+  renderBuildings(buildingsGeoJSON);
+
+  floodLayer = L.vectorGrid.slicer(floodGeoJSON, {
+    rendererFactory: L.svg.tile,
+    vectorTileLayerStyles: { sliced: { fillColor: '#1E90FF', fillOpacity: 0.4, stroke: false, fill: true } },
+    interactive: false, maxZoom: 20
+  });
+  if (document.getElementById('toggle-flood').checked) floodLayer.addTo(map);
+
+  floodedSegmentsLayer = L.geoJSON(floodedData, {
+    style: { color: '#d73027', weight: 2, opacity: 0.8 }
+  });
+  if (document.getElementById('toggle-flooded-segments').checked) floodedSegmentsLayer.addTo(map);
+
+  setStatus('');
 }
 
 // Help popup
@@ -467,80 +415,32 @@ document.getElementById('btn-how-to-use').addEventListener('click', function() {
 });
 
 // ---------------------------------------------------------------------------
+// Event listeners — route buttons
+// ---------------------------------------------------------------------------
+
+document.getElementById('btn-safe-route').addEventListener('click',   () => toggleRoute('safe'));
+document.getElementById('btn-direct-route').addEventListener('click', () => toggleRoute('direct'));
+document.getElementById('btn-clear').addEventListener('click', clearRoutes);
+
+// ---------------------------------------------------------------------------
 // Event listeners — layer toggles
 // ---------------------------------------------------------------------------
 
-document.getElementById('toggle-flood').addEventListener('change', function () {
+document.getElementById('toggle-flood').addEventListener('change', function() {
   if (!floodLayer) return;
   this.checked ? floodLayer.addTo(map) : map.removeLayer(floodLayer);
 });
-
-document.getElementById('toggle-buildings').addEventListener('change', function () {
+document.getElementById('toggle-buildings').addEventListener('change', function() {
   if (!buildingsLayer) return;
   this.checked ? buildingsLayer.addTo(map) : map.removeLayer(buildingsLayer);
 });
-
-document.getElementById('toggle-colors').addEventListener('change', function () {
+document.getElementById('toggle-colors').addEventListener('change', function() {
   currentColorMode = this.checked;
   if (buildingsLayer) buildingsLayer.setStyle(getBuildingStyle);
 });
-
-document.getElementById('toggle-flooded-segments').addEventListener('change', function () {
+document.getElementById('toggle-flooded-segments').addEventListener('change', function() {
   if (this.checked) floodedSegmentsLayer?.addTo(map);
   else if (floodedSegmentsLayer) map.removeLayer(floodedSegmentsLayer);
 });
-
-document.getElementById('dataset-select').addEventListener('change', function () {
-  if (this.value) loadDataset(this.value);
-});
-
-// ---------------------------------------------------------------------------
-// Event listeners — route panel
-// ---------------------------------------------------------------------------
-
-document.getElementById('btn-route').addEventListener('click', function () {
-  const fromVal = document.getElementById('origin-input').value.trim();
-  const toVal   = document.getElementById('dest-input').value.trim();
-  if (!fromVal) { setRouteStatus('Enter an origin building ID.'); return; }
-  originBid = fromVal;
-  destBid   = toVal || null;
-  computeRoute(originBid, destBid);
-});
-
-document.getElementById('btn-emergency').addEventListener('click', function () {
-  if (!originBid || !currentDataset) return;
-  computeRoute(originBid, null);
-});
-
-document.getElementById('btn-clear').addEventListener('click', function () {
-  clearRoute();
-  resetInput('origin');
-  resetInput('dest');
-  updatePanelState();
-});
-
-// ---------------------------------------------------------------------------
-// Initialisation
-// ---------------------------------------------------------------------------
-
-async function init() {
-  try {
-    const data   = await fetchJson(apiUrl('datasets'));
-    const select = document.getElementById('dataset-select');
-
-    for (const name of data.datasets) {
-      select.appendChild(new Option(name, name));
-    }
-
-    if (data.datasets.length > 0) {
-      select.value = data.datasets[0];
-      await loadDataset(data.datasets[0]);
-    } else {
-      setRouteStatus('No datasets available.');
-    }
-  } catch (err) {
-    setRouteStatus(`<span style="color:red">Failed to load datasets: ${err.message}</span>`);
-  }
-}
 
 init();
