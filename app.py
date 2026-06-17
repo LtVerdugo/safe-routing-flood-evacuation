@@ -295,7 +295,7 @@ def find_emergency_route(G, from_bid, kdtree=None, safe_bids=None):
 
 @app_route("/")
 def index():
-    return send_from_directory(app.static_folder, "index.html")
+    return send_from_directory(app.static_folder, "index_original.html")
 
 
 @app_route("/api/datasets")

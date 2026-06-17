@@ -89,7 +89,7 @@ def add_dataset(name, G, buildings_gdf, flood_gdf):
     flood_display = flood_wgs84.copy()
     flood_display.geometry = flood_wgs84.geometry.simplify(0.00001, preserve_topology=False)
     flood_display = flood_display[flood_display.geometry.notna() & ~flood_display.geometry.is_empty]
-    flood_geojson = _gdf_to_geojson_str(flood_display, ["fid"])
+    flood_geojson = _gdf_to_geojson_str(flood_display, ["fid", "depth_m"])
 
     CACHE[name] = {
         "G":                G,
