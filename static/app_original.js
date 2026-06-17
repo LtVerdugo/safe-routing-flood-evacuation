@@ -80,6 +80,7 @@ let boundaryLayer         = null;   // L.geoJSON city boundary layer
 let bezirkeLayer          = null;   // L.geoJSON Bezirke districts layer
 let routePolylines        = [];     // array of active L.polyline instances
 let currentColorMode      = true;   // true = color by flood_status, false = uniform blue
+let compareMode           = false;
 
 let selectionMode      = 'origin';  // 'origin' | 'dest' | null
 let originBid          = null;
@@ -281,63 +282,101 @@ function renderBuildings(geojson) {
 // Dataset loading
 // ---------------------------------------------------------------------------
 
-async function loadHamburgBoundary() {
-  if (boundaryLayer) return; // ya cargado
+async function loadHamburgBoundaries() {
   try {
-    const url = 'https://nominatim.openstreetmap.org/search?q=Hamburg,Germany&format=geojson&polygon_geojson=1&limit=1';
-    const res = await fetch(url);
-    const data = await res.json();
-    if (!data.features || data.features.length === 0) return;
-    boundaryLayer = L.geoJSON(data, {
-      style: {
-        color: '#1a1a1a',
-        weight: 2,
-        fillOpacity: 0,
-        opacity: 0.8
-      },
-      interactive: false
-    });
-    if (document.getElementById('toggle-boundary').checked) {
+    if (!boundaryLayer || !bezirkeLayer) {
+      const res = await fetch(`${APP_BASE}/static/data/hamburg_boundaries.geojson`);
+      const geojson = await res.json();
+      const cityFeatures   = geojson.features.filter(f => f.properties.type === 'city_boundary');
+      const bezirkFeatures = geojson.features.filter(f => f.properties.type === 'bezirk');
+
+      if (!boundaryLayer) {
+        boundaryLayer = L.geoJSON({ type: 'FeatureCollection', features: cityFeatures }, {
+          style: { color: '#1a1a1a', weight: 2, fillOpacity: 0, opacity: 0.8 },
+          interactive: false
+        });
+      }
+
+      if (!bezirkeLayer) {
+        bezirkeLayer = L.geoJSON({ type: 'FeatureCollection', features: bezirkFeatures }, {
+          style: { color: '#444444', weight: 1.5, fillOpacity: 0, opacity: 0.7, dashArray: '6,4' },
+          onEachFeature: function(feature, layer) {
+            const name = feature.properties && feature.properties.name;
+            if (name) {
+              layer.bindTooltip(name, { permanent: true, direction: 'center', className: 'bezirk-label' });
+            }
+          },
+          interactive: false
+        });
+      }
+    }
+
+    if (document.getElementById('toggle-boundary').checked && !map.hasLayer(boundaryLayer)) {
       boundaryLayer.addTo(map);
     }
+    if (document.getElementById('toggle-bezirke').checked && !map.hasLayer(bezirkeLayer)) {
+      bezirkeLayer.addTo(map);
+    }
+
   } catch (err) {
-    console.warn('Could not load Hamburg boundary:', err);
+    console.warn('Could not load Hamburg boundaries:', err);
   }
 }
 
-async function loadHamburgBezirke() {
-  if (bezirkeLayer) return;
-  try {
-    const res = await fetch(`${APP_BASE}/static/data/hamburg_bezirke.geojson`);
-    const geojson = await res.json();
+const COMPARE_DATASETS = [
+  { id: 'hamburg_river_flood_frequent', label: '10-year return period' },
+  { id: 'hamburg_river_flood_medium',   label: '100-year return period' },
+  { id: 'hamburg_river_flood_extreme',  label: '200-year return period' }
+];
 
-    bezirkeLayer = L.geoJSON(geojson, {
-      style: {
-        color: '#444444',
-        weight: 1.5,
-        fillOpacity: 0,
-        opacity: 0.7,
-        dashArray: '6,4'
-      },
-      onEachFeature: function(feature, layer) {
-        const name = feature.properties && feature.properties.name;
-        if (name) {
-          layer.bindTooltip(name, {
-            permanent: true,
-            direction: 'center',
-            className: 'bezirk-label'
-          });
-        }
-      },
-      interactive: false
-    });
+async function enterCompareMode() {
+  compareMode = true;
+  document.getElementById('btn-compare').style.display = 'none';
+  document.getElementById('dataset-select').style.display = 'none';
+  document.getElementById('route-panel').style.display = 'none';
+  document.querySelector('.btn-section').style.display = 'none';
+  document.getElementById('route-status').style.display = 'none';
+  document.getElementById('result-section').style.display = 'none';
+  document.getElementById('compare-panel').style.display = 'block';
+  document.getElementById('toggle-boundary').checked = true;
+  document.getElementById('toggle-bezirke').checked = true;
+  document.querySelector('.sidebar-title').innerHTML = '<span class="title-icon">◈</span> Flood comparison';
+  document.querySelector('.sidebar-badge').textContent = 'Hamburg · River Flood';
+  document.getElementById('sidebar').style.background = '#1a2744';
+  document.querySelector('.sidebar-title').style.color = '#ffffff';
+  document.querySelector('.sidebar-badge').style.background = '#2a3f6f';
+  document.querySelector('.sidebar-badge').style.color = '#a8c4e8';
+  document.querySelectorAll('.section-label').forEach(el => el.style.color = '#7a9cc4');
+  document.querySelectorAll('.toggle-row').forEach(el => el.style.color = '#c8d8ed');
+  document.querySelectorAll('.legend-row').forEach(el => el.style.color = '#c8d8ed');
+  document.getElementById('compare-slider').value = 0;
+  document.getElementById('compare-slider-label').textContent = COMPARE_DATASETS[0].label;
+  document.getElementById('dataset-select').value = 'hamburg_river_flood_frequent';
+  map.setMaxBounds(null);
+  map.setMinZoom(1);
+  map.setView([53.55, 10.0], 11);
+  await loadDataset('hamburg_river_flood_frequent');
+}
 
-    if (document.getElementById('toggle-bezirke').checked) {
-      bezirkeLayer.addTo(map);
-    }
-  } catch (err) {
-    console.warn('Could not load Bezirke:', err);
-  }
+async function exitCompareMode() {
+  compareMode = false;
+  document.getElementById('btn-compare').style.display = 'block';
+  document.getElementById('dataset-select').style.display = 'block';
+  document.getElementById('route-panel').style.display = 'block';
+  document.querySelector('.btn-section').style.display = 'flex';
+  document.getElementById('route-status').style.display = 'block';
+  document.getElementById('compare-panel').style.display = 'none';
+  document.querySelector('.sidebar-title').innerHTML = '<span class="title-icon">◈</span> Flood routing';
+  document.querySelector('.sidebar-badge').textContent = 'Brandenburg · Jan 2024';
+  document.getElementById('sidebar').style.background = '#ffffff';
+  document.querySelector('.sidebar-title').style.color = '#1a1a1a';
+  document.querySelector('.sidebar-badge').style.background = '#E1F5EE';
+  document.querySelector('.sidebar-badge').style.color = '#0F6E56';
+  document.querySelectorAll('.section-label').forEach(el => el.style.color = '#9e9e9e');
+  document.querySelectorAll('.toggle-row').forEach(el => el.style.color = '#444');
+  document.querySelectorAll('.legend-row').forEach(el => el.style.color = '#444');
+  document.getElementById('dataset-select').value = 'brandenburg';
+  await loadDataset('brandenburg');
 }
 
 async function loadDataset(name) {
@@ -346,7 +385,11 @@ async function loadDataset(name) {
   clearRoute();
   resetInput('origin');
   resetInput('dest');
-  if (floodLayer)            { map.removeLayer(floodLayer);               floodLayer            = null; }
+  if (floodLayer) {
+    try { map.removeLayer(floodLayer); } catch(e) {}
+    try { floodLayer.remove(); } catch(e) {}
+    floodLayer = null;
+  }
   if (depthLayer)            { map.removeLayer(depthLayer);               depthLayer            = null; }
   if (buildingsLayer)        { map.removeLayer(buildingsLayer);            buildingsLayer        = null; }
   if (floodedSegmentsLayer)  { map.removeLayer(floodedSegmentsLayer);      floodedSegmentsLayer  = null; }
@@ -360,12 +403,14 @@ async function loadDataset(name) {
     ]);
 
     const [minx, miny, maxx, maxy] = bboxData.bbox;
-    const pad = 0.5;
-    map.setMaxBounds([[miny - pad, minx - pad], [maxy + pad, maxx + pad]]);
-    map.setMinZoom(9);
-    const centerLat = (miny + maxy) / 2;
-    const centerLon = (minx + maxx) / 2;
-    map.setView([centerLat, centerLon], 14);
+    if (!compareMode) {
+      const pad = 0.5;
+      map.setMaxBounds([[miny - pad, minx - pad], [maxy + pad, maxx + pad]]);
+      map.setMinZoom(9);
+      const centerLat = (miny + maxy) / 2;
+      const centerLon = (minx + maxx) / 2;
+      map.setView([centerLat, centerLon], 14);
+    }
 
     floodLayer = L.vectorGrid.slicer(floodGeoJSON, {
       rendererFactory: L.svg.tile,
@@ -423,8 +468,7 @@ async function loadDataset(name) {
     setSelectionMode('origin');
 
     if (name.toLowerCase().includes('hamburg')) {
-      loadHamburgBoundary();
-      loadHamburgBezirke();
+      loadHamburgBoundaries();
     } else {
       if (boundaryLayer) { map.removeLayer(boundaryLayer); boundaryLayer = null; }
       document.getElementById('toggle-boundary').checked = false;
@@ -606,6 +650,16 @@ document.getElementById('toggle-bezirke').addEventListener('change', function() 
   this.checked ? bezirkeLayer.addTo(map) : map.removeLayer(bezirkeLayer);
 });
 
+document.getElementById('btn-compare').addEventListener('click', enterCompareMode);
+document.getElementById('btn-exit-compare').addEventListener('click', exitCompareMode);
+
+document.getElementById('compare-slider').addEventListener('input', async function() {
+  const idx = parseInt(this.value);
+  const dataset = COMPARE_DATASETS[idx];
+  document.getElementById('compare-slider-label').textContent = dataset.label;
+  await loadDataset(dataset.id);
+});
+
 document.getElementById('dataset-select').addEventListener('change', function () {
   if (this.value) loadDataset(this.value);
 });
@@ -649,8 +703,11 @@ async function init() {
     }
 
     if (data.datasets.length > 0) {
-      select.value = data.datasets[0];
-      await loadDataset(data.datasets[0]);
+      const defaultDataset = data.datasets.includes('brandenburg')
+        ? 'brandenburg'
+        : data.datasets[0];
+      select.value = defaultDataset;
+      await loadDataset(defaultDataset);
     } else {
       setRouteStatus('No datasets available.');
     }
