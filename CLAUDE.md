@@ -209,12 +209,28 @@ Tabla de nomenclatura de escenarios:
 | Edificios | OSM Hamburg filtrado con STRtree buffer 500m | 58993 edificios |
 | Red viaria | osmium polygon buffer 1km | Extraída por polígono |
 
+**`hamburg_river_flood_medium`** — Binnenhochwasser Mittel HQ100, toda Hamburg (activo)
+
+| Capa | Fuente | Notas |
+|---|---|---|
+| Flood mask | GeoTIFF `wt_rw_m.tif` vectorizado con rasterio | Cubre toda Hamburg |
+| Flood polygons | `depth_m` values: 0.25 / 0.75 / 1.5 / 3.0 / 5.0 m | — |
+| Edificios | OSM Hamburg filtrado con STRtree buffer 500m | — |
+| Red viaria | osmium polygon buffer 1km | Extraída por polígono |
+
+**`hamburg_river_flood_extreme`** — Binnenhochwasser Extrem HQ200, toda Hamburg (activo)
+
+| Capa | Fuente | Notas |
+|---|---|---|
+| Flood mask | GeoTIFF `wt_rw_l.tif` vectorizado con rasterio | Cubre toda Hamburg |
+| Flood polygons | `depth_m` values: 0.25 / 0.75 / 1.5 / 3.0 / 5.0 m | — |
+| Edificios | OSM Hamburg filtrado con STRtree buffer 500m | — |
+| Red viaria | osmium polygon buffer 1km | Extraída por polígono |
+
 #### Datasets Hamburg pendientes
 
 | Nombre previsto | GeoTIFF | Estado |
 |---|---|---|
-| `hamburg_river_flood_medium` | `wt_rw_m.tif` | Pendiente |
-| `hamburg_river_flood_extreme` | `wt_rw_l.tif` | Pendiente |
 | `hamburg_coastal_frequent` | `wt_cw_h.tif` | Pendiente |
 | `hamburg_coastal_medium` | `wt_cw_m.tif` | Pendiente |
 
@@ -317,11 +333,15 @@ Los datos Hamburg llegan como GeoTIFF de profundidad de agua, no como vectores. 
 - Añadir `static/app_original.js` y `static/index_original.html` al `.gitignore` para que no reaparezcan como untracked tras regenerarlos.
 
 ### Dataset Hamburg HWRM
-- Completar `hamburg_river_flood_medium` y `hamburg_river_flood_extreme` (GeoTIFF `wt_rw_m.tif` y `wt_rw_l.tif`).
 - Añadir Küstenhochwasser Häufig (`wt_cw_h.tif`) y Mittel (`wt_cw_m.tif`) como datasets.
 - Automatizar descarga de GeoTIFF desde Geoportal Hamburg (actualmente descarga manual — resolver vía WFS/OGC API).
 - Automatizar subida a Google Drive para que el pipeline sea reproducible sin pasos manuales entre sesiones de Colab.
 - Fase 3 profundidad de routing: `routing_cost` ya es proporcional a `depth_m` en el grafo; pendiente visualización de profundidad en los segmentos de ruta en el frontend.
+
+### Mejoras de pipeline y frontend
+- Mejorar filtro de área en vectorización raster: de 500m² a 50m² para capturar polígonos pequeños de inundación que el filtro actual descarta.
+- Evaluar `simplify(5)` vs `simplify(0)` en el pipeline Hamburg — `simplify(5)` reduce vértices pero puede perder precisión en canales estrechos; `simplify(0)` mantiene geometría raster exacta al coste de más vértices.
+- Rediseño de toggles en sidebar: estilo iOS u otro diseño moderno en lugar de checkboxes HTML nativos.
 
 ### Mejoras de arquitectura
 - Soporte multi-dataset en el modo demo estático: selector de escenario + ficheros JSON por escenario en `static/data/<nombre>/`.
@@ -362,44 +382,133 @@ Paleta de colores:
 | 3.0 | `#f16913` | 2.0 – 4.0 m |
 | 5.0 | `#d73027` | > 4.0 m |
 
-### `boundaryLayer` — límite administrativo de la ciudad
+### `loadHamburgBoundaries()` — boundary + Bezirke en una sola función
+
+Reemplaza las antiguas funciones separadas `loadHamburgBoundary()` y `loadHamburgBezirke()`. Lee un único fichero estático y gestiona ambas capas:
 
 ```javascript
-async function loadHamburgBoundary() {
-  if (boundaryLayer) return; // cargado una sola vez por sesión
-  const url = 'https://nominatim.openstreetmap.org/search?q=Hamburg,Germany'
-            + '&format=geojson&polygon_geojson=1&limit=1';
-  const data = await fetch(url).then(r => r.json());
-  boundaryLayer = L.geoJSON(data, {
-    style: { color: '#1a1a1a', weight: 2, fillOpacity: 0, opacity: 0.8 },
-    interactive: false
-  });
+async function loadHamburgBoundaries() {
+  try {
+    if (!boundaryLayer || !bezirkeLayer) {
+      const res = await fetch(`${APP_BASE}/static/data/hamburg_boundaries.geojson`);
+      const geojson = await res.json();
+      const cityFeatures   = geojson.features.filter(f => f.properties.type === 'city_boundary');
+      const bezirkFeatures = geojson.features.filter(f => f.properties.type === 'bezirk');
+
+      if (!boundaryLayer) {
+        boundaryLayer = L.geoJSON({ type: 'FeatureCollection', features: cityFeatures }, {
+          style: { color: '#1a1a1a', weight: 2, fillOpacity: 0, opacity: 0.8 },
+          interactive: false
+        });
+      }
+
+      if (!bezirkeLayer) {
+        bezirkeLayer = L.geoJSON({ type: 'FeatureCollection', features: bezirkFeatures }, {
+          style: { color: '#444444', weight: 1.5, fillOpacity: 0, opacity: 0.7, dashArray: '6,4' },
+          onEachFeature: function(feature, layer) {
+            const name = feature.properties && feature.properties.name;
+            if (name) layer.bindTooltip(name, { permanent: true, direction: 'center', className: 'bezirk-label' });
+          },
+          interactive: false
+        });
+      }
+    }
+
+    if (document.getElementById('toggle-boundary').checked && !map.hasLayer(boundaryLayer)) {
+      boundaryLayer.addTo(map);
+    }
+    if (document.getElementById('toggle-bezirke').checked && !map.hasLayer(bezirkeLayer)) {
+      bezirkeLayer.addTo(map);
+    }
+
+  } catch (err) {
+    console.warn('Could not load Hamburg boundaries:', err);
+  }
 }
 ```
 
-- Se carga **una sola vez** por sesión (guard `if (boundaryLayer) return`) desde Nominatim — sin coste adicional al cambiar de dataset Hamburg.
-- Se activa automáticamente cuando `name.toLowerCase().includes('hamburg')` al final del bloque `try` de `loadDataset()`. Se elimina del mapa y se resetea si se carga un dataset no-Hamburg.
-- Toggle "City boundary" en sidebar — **activado por defecto**.
+- **Creación de capas** (guard `!boundaryLayer || !bezirkeLayer`): el fetch solo se ejecuta la primera vez o si una de las capas se anuló. Después solo se reutilizan los objetos ya creados.
+- **`addTo` separado de la creación**: el bloque `addTo` siempre se ejecuta al final, con guard `map.hasLayer()`. Esto garantiza que las capas reaparezcan al cambiar de dataset con el slider del modo comparación — sin duplicarlas.
+- Se invoca en `loadDataset()` dentro del bloque `if (name.toLowerCase().includes('hamburg'))`.
+- Si el dataset no es Hamburg, `loadDataset()` llama a `map.removeLayer()` sobre ambas capas y las pone a `null`.
+
+### `static/data/hamburg_boundaries.geojson` — fichero estático combinado
+
+- **257 KB**, 8 features: 1 feature con `type: 'city_boundary'` + 7 features con `type: 'bezirk'`.
+- Reemplaza el antiguo `hamburg_bezirke.geojson` (que contenía solo los Bezirke) y elimina la dependencia de Nominatim en tiempo de carga.
+- Los 7 Bezirke son las relaciones OSM de admin_level=9: Hamburg-Mitte, Altona, Eimsbüttel, Hamburg-Nord, Wandsbek, Bergedorf, Harburg. El city boundary es la relación OSM de admin_level=4.
+- Estructura de cada feature:
+  ```json
+  { "properties": { "type": "city_boundary"|"bezirk", "name": "Hamburg"|"<Bezirk>" }, "geometry": { ... } }
+  ```
+
+### `boundaryLayer` — límite administrativo de la ciudad
+
+- Capa `L.geoJSON` creada dentro de `loadHamburgBoundaries()` a partir de los features con `type === 'city_boundary'`.
 - Estilo: borde negro `#1a1a1a`, `weight: 2`, sin relleno (`fillOpacity: 0`).
-- Si Nominatim no responde, el error se captura silenciosamente con `console.warn` — la capa simplemente no aparece, sin romper el resto de la UI.
+- Toggle "City boundary" en sidebar — **activado por defecto**.
+- Se pone a `null` cuando se carga un dataset no-Hamburg (permite recrearla al volver a Hamburg).
 
 ### `bezirkeLayer` — límites de los 7 Bezirke de Hamburg
 
-```javascript
-bezirkeLayer = L.geoJSON(geojson, {
-  style: { color: '#444444', weight: 1.5, fillOpacity: 0, opacity: 0.7, dashArray: '6,4' },
-  onEachFeature: function(feature, layer) {
-    const name = feature.properties && feature.properties.name;
-    if (name) layer.bindTooltip(name, { permanent: true, direction: 'center', className: 'bezirk-label' });
-  },
-  interactive: false
-});
-```
-
-- Datos precargados desde **`static/data/hamburg_bezirke.geojson`** (72 KB) — no requiere llamada a Overpass en tiempo de carga.
-- Fichero generado vía Nominatim (7 peticiones individuales por Bezirk) y guardado estáticamente. Los 7 Bezirke: Hamburg-Mitte (MultiPolygon), Altona, Eimsbüttel, Hamburg-Nord, Wandsbek, Bergedorf, Harburg.
-- Se carga con `fetch(APP_BASE + '/static/data/hamburg_bezirke.geojson')` — misma convención de paths que el resto de `app_original.js`.
+- Capa `L.geoJSON` creada dentro de `loadHamburgBoundaries()` a partir de los features con `type === 'bezirk'`.
+- Estilo: borde gris `#444444`, `weight: 1.5`, línea discontinua `dashArray: '6,4'`, sin relleno.
 - Tooltips permanentes centrados con clase `.bezirk-label` (fondo transparente, 11px, `font-weight: 600`).
 - Toggle "Bezirke" en sidebar — **activado por defecto**.
-- No requiere la librería `osmtogeojson` — el GeoJSON viene directamente de Nominatim en formato estándar.
-- Se activa/limpia junto con `boundaryLayer` en el bloque Hamburg/non-Hamburg de `loadDataset()`.
+- Se pone a `null` cuando se carga un dataset no-Hamburg.
+
+### Modo comparación — `compareMode` + slider
+
+Variable de estado `compareMode` (booleano, `false` por defecto) que controla el comportamiento del mapa al cambiar datasets.
+
+```javascript
+const COMPARE_DATASETS = [
+  { id: 'hamburg_river_flood_frequent', label: '10-year return period' },
+  { id: 'hamburg_river_flood_medium',   label: '100-year return period' },
+  { id: 'hamburg_river_flood_extreme',  label: '200-year return period' }
+];
+```
+
+- **`enterCompareMode()`** (async): pone `compareMode = true`, oculta el panel de routing, muestra `#compare-panel`, aplica tema oscuro al sidebar (`background: #1a2744`), activa toggles boundary y bezirke, llama `map.setMaxBounds(null)` + `map.setMinZoom(1)` + `map.setView([53.55, 10.0], 11)` antes de `loadDataset('hamburg_river_flood_frequent')`.
+- **`exitCompareMode()`** (async): pone `compareMode = false`, restaura el panel de routing y tema claro, vuelve a `loadDataset('brandenburg')`.
+- **Slider `#compare-slider`** (range 0–2): event listener `input` lee el índice, actualiza la etiqueta `#compare-slider-label` y llama `loadDataset(COMPARE_DATASETS[idx].id)`.
+
+### `if (!compareMode)` en `loadDataset()`
+
+```javascript
+const [minx, miny, maxx, maxy] = bboxData.bbox;
+if (!compareMode) {
+  const pad = 0.5;
+  map.setMaxBounds([[miny - pad, minx - pad], [maxy + pad, maxx + pad]]);
+  map.setMinZoom(9);
+  map.setView([(miny + maxy) / 2, (minx + maxx) / 2], 14);
+}
+```
+
+- Sin este guard, cada cambio de dataset con el slider recentraría el mapa y resetearía los bounds, interrumpiendo la experiencia de comparación.
+- El zoom y posición en modo comparación los fija `enterCompareMode()` una sola vez (`setView([53.55, 10.0], 11)`).
+
+### Limpieza de `floodLayer` — doble `try/catch`
+
+```javascript
+if (floodLayer) {
+  try { map.removeLayer(floodLayer); } catch(e) {}
+  try { floodLayer.remove(); } catch(e) {}
+  floodLayer = null;
+}
+```
+
+- `L.vectorGrid.slicer` puede lanzar errores internos si la capa ya fue removida o si el tile worker está en un estado inválido. El doble `try/catch` garantiza que `floodLayer = null` siempre se ejecuta aunque falle la remoción.
+- Las otras capas (`depthLayer`, `buildingsLayer`, `floodedSegmentsLayer`) usan el patrón simple `map.removeLayer()` sin `try/catch` porque son `L.geoJSON` estándar.
+
+### Brandenburg cargado por defecto en `init()`
+
+```javascript
+const defaultDataset = data.datasets.includes('brandenburg')
+  ? 'brandenburg'
+  : data.datasets[0];
+select.value = defaultDataset;
+await loadDataset(defaultDataset);
+```
+
+- Antes se cargaba siempre el primer dataset de la lista (orden de `datasets/` en disco). Ahora se prioriza `'brandenburg'` si está disponible.
