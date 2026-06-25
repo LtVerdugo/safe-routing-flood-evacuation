@@ -346,10 +346,91 @@ def api_flooded_segments():
         features.append({
             "type": "Feature",
             "geometry": {"type": "LineString", "coordinates": coords},
-            "properties": {"length": data.get("length", 0)}
+            "properties": {
+                "length": data.get("length", 0),
+                "depth_m": data.get("depth_m", 0.0)
+            }
         })
 
     return jsonify({"type": "FeatureCollection", "features": features})
+
+
+@app_route("/api/raster")
+def api_raster():
+    """Serve the .tif COG file for a dataset with HTTP range-request support.
+
+    GeoRasterLayer fetches the COG in byte-range chunks; without Accept-Ranges
+    and 206 partial responses the library falls back to a full download or fails.
+    This is intentional I/O in a request handler — the file is not cached in RAM
+    because COGs can be several hundred MB and are only needed by this endpoint.
+    """
+    name = request.args.get("dataset")
+    if not name:
+        return jsonify({"error": "dataset parameter required"}), 400
+
+    dataset_dir = Path(_BASE_DIR) / name
+    if not dataset_dir.exists():
+        return jsonify({"error": "dataset not found"}), 404
+
+    tif_files = list(dataset_dir.glob("*.tif")) + list(dataset_dir.glob("*.tiff"))
+    if not tif_files:
+        return jsonify({"error": "no raster file in this dataset"}), 404
+
+    tif_path = tif_files[0]
+    file_size = tif_path.stat().st_size
+    range_header = request.headers.get("Range")
+
+    if range_header:
+        try:
+            byte_range = range_header.split("=", 1)[1]
+            parts = byte_range.split("-")
+            start = int(parts[0]) if parts[0] else 0
+            end   = int(parts[1]) if len(parts) > 1 and parts[1] else file_size - 1
+        except (ValueError, IndexError):
+            return Response("Bad Range header", status=416)
+
+        if start >= file_size:
+            return Response(status=416, headers={"Content-Range": f"bytes */{file_size}"})
+
+        end    = min(end, file_size - 1)
+        length = end - start + 1
+
+        def _stream_range(path, offset, size, chunk=65536):
+            with open(path, "rb") as fh:
+                fh.seek(offset)
+                remaining = size
+                while remaining > 0:
+                    data = fh.read(min(chunk, remaining))
+                    if not data:
+                        break
+                    remaining -= len(data)
+                    yield data
+
+        return Response(
+            _stream_range(tif_path, start, length),
+            status=206,
+            headers={
+                "Content-Range":  f"bytes {start}-{end}/{file_size}",
+                "Accept-Ranges":  "bytes",
+                "Content-Length": str(length),
+                "Content-Type":   "image/tiff",
+            },
+        )
+
+    def _stream_full(path, chunk=65536):
+        with open(path, "rb") as fh:
+            while data := fh.read(chunk):
+                yield data
+
+    return Response(
+        _stream_full(tif_path),
+        status=200,
+        headers={
+            "Accept-Ranges":  "bytes",
+            "Content-Length": str(file_size),
+            "Content-Type":   "image/tiff",
+        },
+    )
 
 
 @app_route("/api/route")
@@ -384,13 +465,15 @@ def api_route():
         if to_bid:
             # Direct A* to the caller-specified destination.
             try:
-                best_path   = nx.astar_path(G, from_bid, to_bid, heuristic=heuristic, weight="routing_cost")
-                best_cost   = nx.path_weight(G, best_path, weight="routing_cost")
-                best_target = to_bid
+                best_path     = nx.astar_path(G, from_bid, to_bid, heuristic=heuristic, weight="routing_cost")
+                best_cost     = nx.path_weight(G, best_path, weight="routing_cost")
+                has_wet_route = best_cost == float("inf")
+                best_target   = to_bid
             except (nx.NetworkXNoPath, nx.NodeNotFound):
                 return jsonify({"found": False, "reason": "no path between the two buildings"})
         else:
-            kdtree   = ds.get("safe_kdtree")
+            has_wet_route = False
+            kdtree    = ds.get("safe_kdtree")
             safe_bids = ds.get("safe_bids", [])
             best_path, best_cost = find_emergency_route(G, from_bid, kdtree, safe_bids)
             if best_path is None:
@@ -412,15 +495,28 @@ def api_route():
             if geom is None:
                 continue
 
+            # Verify geometry orientation matches u→v direction.
+            # Road nodes carry x/y in EPSG:25832; building nodes (B_) do not — skip for those.
+            coords = list(geom.coords)
+            u_data = G.nodes[u]
+            v_data = G.nodes[v]
+            if "x" in u_data and "x" in v_data:
+                gx0, gy0 = coords[0]
+                dist_u = (u_data["x"] - gx0) ** 2 + (u_data["y"] - gy0) ** 2
+                dist_v = (v_data["x"] - gx0) ** 2 + (v_data["y"] - gy0) ** 2
+                if dist_v < dist_u:
+                    coords = coords[::-1]
+
             features.append({
                 "type": "Feature",
                 "geometry": {
                     "type": "LineString",
-                    "coordinates": _reproject_linestring(geom),
+                    "coordinates": [list(_transformer.transform(x, y)) for x, y in coords],
                 },
                 "properties": {
                     "flooded": edge_data.get("flooded", False),
                     "length": edge_data.get("length", 0),
+                    "depth_m": edge_data.get("depth_m", 0.0),
                 },
             })
 
@@ -444,16 +540,16 @@ def api_route():
             access_from_lonlat=access_from_lonlat
         )
 
-        return jsonify({
-            "found": True,
-            "from": from_bid,
-            "to": best_target,
-            "mode": "emergency" if not to_bid else "normal",
-            "total_cost": best_cost,
-            "road_segments": len(features),
+        response = {
+            "found":            not has_wet_route,
+            "from":             from_bid,
+            "to":               best_target,
+            "mode":             "emergency" if not to_bid else "normal",
+            "total_cost":       best_cost if best_cost != float("inf") else None,
+            "road_segments":    len(features),
             "flooded_segments": flooded_count,
-            "from_status": from_status,
-            "to_status": to_status,
+            "from_status":      from_status,
+            "to_status":        to_status,
             "path_geojson": {
                 "type": "FeatureCollection",
                 "features": features,
@@ -461,7 +557,11 @@ def api_route():
             "directions": directions,
             "access_from": {"node": str(access_from_node), "coordinates": [af_lon, af_lat]} if af_lon is not None else None,
             "access_to":   {"node": str(access_to_node),   "coordinates": [at_lon, at_lat]} if at_lon is not None else None,
-        })
+        }
+        if has_wet_route:
+            response["reason"]        = "no dry path between the two buildings"
+            response["has_wet_route"] = True
+        return jsonify(response)
     except Exception as e:
         app.logger.exception("Error in /api/route: %s", e)
         return jsonify({"error": str(e)}), 500

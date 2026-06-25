@@ -67,6 +67,54 @@ L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}' + (L.Brows
   maxZoom: 20
 }).addTo(map);
 
+map.on('click', async function(e) {
+  if (!document.getElementById('toggle-depth').checked) return;
+  if (!activeGeoRaster) return;
+
+  // Reproyectar WGS84 → EPSG:25832 antes de identificar
+  const wgs84 = 'EPSG:4326';
+  const utm32 = '+proj=utm +zone=32 +ellps=GRS80 +towgs84=0,0,0,0,0,0,0 +units=m +no_defs';
+  const [x, y] = proj4(wgs84, utm32, [e.latlng.lng, e.latlng.lat]);
+  const values = await geoblaze.identify(activeGeoRaster, [x, y]);
+  const v = values && values[0];
+
+  const panel    = document.getElementById('depth-panel');
+  const content  = document.getElementById('depth-panel-content');
+  const closeBtn = document.getElementById('btn-close-depth-panel');
+
+  if (v === null || v === undefined || v === 65535 || v < 5) {
+    content.innerHTML = `<div style="font-size:13px;color:#666;">No water at this location</div>`;
+  } else {
+    const depthM = v / 100;
+    let color = '#d73027';
+    if (depthM < 0.1)      color = '#c6dbef';
+    else if (depthM < 0.3) color = '#9ecae1';
+    else if (depthM < 0.5) color = '#6baed6';
+    else if (depthM < 1.0) color = '#3182bd';
+    else if (depthM < 2.0) color = '#2171b5';
+    const pct = Math.min(100, (depthM / 5.45) * 100).toFixed(1);
+    const lat  = e.latlng.lat.toFixed(5);
+    const lon  = e.latlng.lng.toFixed(5);
+    content.innerHTML =
+      `<div style="font-size:28px;font-weight:700;color:${color};margin-bottom:4px">${depthM.toFixed(2)} m</div>` +
+      `<div style="font-size:11px;color:#999;margin-bottom:16px">water depth at click point</div>` +
+      `<div style="background:#f5f5f5;border-radius:6px;overflow:hidden;height:8px;margin-bottom:4px">` +
+      `  <div style="width:${pct}%;height:100%;background:${color};transition:width 0.3s"></div>` +
+      `</div>` +
+      `<div style="font-size:11px;color:#999;margin-bottom:20px">0 m <span style="float:right">5.45 m max</span></div>` +
+      `<div style="font-size:11px;color:#666;margin-bottom:6px"><strong>Scenario</strong></div>` +
+      `<div style="font-size:12px;color:#1a1a1a;margin-bottom:16px">SRI-12 — Extreme rainfall</div>` +
+      `<div style="font-size:11px;color:#666;margin-bottom:4px"><strong>Coordinates</strong></div>` +
+      `<div style="font-size:12px;color:#1a1a1a;font-family:monospace">${lat}, ${lon}</div>`;
+  }
+
+  panel.style.display = 'flex';
+
+  closeBtn.onclick = function() {
+    panel.style.display = 'none';
+  };
+});
+
 // ---------------------------------------------------------------------------
 // Application state
 // ---------------------------------------------------------------------------
@@ -81,6 +129,7 @@ let bezirkeLayer          = null;   // L.geoJSON Bezirke districts layer
 let routePolylines        = [];     // array of active L.polyline instances
 let currentColorMode      = true;   // true = color by flood_status, false = uniform blue
 let compareMode           = false;
+let activeGeoRaster       = null;   // parsed georaster object when a COG depth layer is active
 
 let selectionMode      = 'origin';  // 'origin' | 'dest' | null
 let originBid          = null;
@@ -391,6 +440,7 @@ async function loadDataset(name) {
     floodLayer = null;
   }
   if (depthLayer)            { map.removeLayer(depthLayer);               depthLayer            = null; }
+  activeGeoRaster = null;
   if (buildingsLayer)        { map.removeLayer(buildingsLayer);            buildingsLayer        = null; }
   if (floodedSegmentsLayer)  { map.removeLayer(floodedSegmentsLayer);      floodedSegmentsLayer  = null; }
 
@@ -429,23 +479,51 @@ async function loadDataset(name) {
       floodLayer.addTo(map);
     }
 
-    // Depth layer
+    // Depth layer — GeoRasterLayer for COG datasets, L.geoJSON for classic datasets.
+    // A COG dataset is detected when the flood GeoJSON has no features (empty placeholder)
+    // or the dataset name contains 'raster'.
     if (depthLayer) { map.removeLayer(depthLayer); depthLayer = null; }
-    depthLayer = L.geoJSON(floodGeoJSON, {
-      style: function(feature) {
-        const depth = feature.properties.depth_m;
-        const color = DEPTH_COLORS[depth] || '#2171b5';
-        return {
-          fillColor: color,
-          fillOpacity: 0.7,
-          color: color,
-          weight: 0.3,
-          opacity: 0.8
-        };
-      },
-      interactive: false
-    });
-    if (document.getElementById('toggle-depth').checked) {
+    activeGeoRaster = null;
+
+    const _hasFloodPolygons = !!(floodGeoJSON.features && floodGeoJSON.features.length);
+    const _useRasterDepth   = !_hasFloodPolygons || name.toLowerCase().includes('raster');
+
+    if (_useRasterDepth && typeof parseGeoraster !== 'undefined') {
+      try {
+        const _rasterUrl = window.location.origin + apiUrl(`raster?dataset=${encodeURIComponent(name)}`);
+        const _gr = await parseGeoraster(_rasterUrl);
+        activeGeoRaster = _gr;
+        depthLayer = new GeoRasterLayer({
+          georaster: _gr,
+          pixelValuesToColorFn: function(values) {
+            const v = values[0];
+            if (v === 65535 || v < 5) return null;   // nodata or < 5 cm → transparent
+            const d = v / 100;                        // uint16 cm → metres
+            if (d < 0.1) return '#c6dbef';
+            if (d < 0.3) return '#9ecae1';
+            if (d < 0.5) return '#6baed6';
+            if (d < 1.0) return '#3182bd';
+            if (d < 2.0) return '#2171b5';
+            return '#d73027';
+          },
+          opacity: 0.7,
+          resolution: 256,
+          interactive: true
+        });
+      } catch (_err) {
+        console.warn('[depth] Could not load COG raster:', _err);
+      }
+    } else if (_hasFloodPolygons) {
+      depthLayer = L.geoJSON(floodGeoJSON, {
+        style: function(feature) {
+          const depth = feature.properties.depth_m;
+          const color = DEPTH_COLORS[depth] || '#2171b5';
+          return { fillColor: color, fillOpacity: 0.7, color: color, weight: 0.3, opacity: 0.8 };
+        },
+        interactive: false
+      });
+    }
+    if (depthLayer && document.getElementById('toggle-depth').checked) {
       depthLayer.addTo(map);
     }
 
@@ -501,6 +579,79 @@ function onBuildingSelected(bid, floodStatus) {
   updatePanelState();
 }
 
+function _renderRouteGeometry(data, fromBid) {
+  originHighlightBid = fromBid;
+  destHighlightBid   = data.to;
+  highlightBuilding(fromBid,  '#1a9850');
+  highlightBuilding(data.to,  '#d73027');
+
+  if (!data.path_geojson || !data.path_geojson.features.length) return;
+
+  const features = data.path_geojson.features;
+  for (const feature of features) {
+    if (!feature.geometry || !feature.geometry.coordinates) continue;
+    const latlngs = feature.geometry.coordinates.map(([lon, lat]) => [lat, lon]);
+    const color   = feature.properties.flooded ? '#d73027' : '#2563eb';
+    routePolylines.push(L.polyline(latlngs, { color, weight: 4 }).addTo(map));
+  }
+
+  const originCenter = getBuildingCenter(fromBid);
+  const destCenter   = getBuildingCenter(data.to);
+
+  // Yellow dashed access lines using backend-provided access node coordinates
+  if (originCenter && data.access_from) {
+    const accessFromPoint = [data.access_from.coordinates[1], data.access_from.coordinates[0]];
+    routePolylines.push(
+      L.polyline([originCenter, accessFromPoint], {
+        color: '#f0c808', weight: 3, dashArray: '8, 8', opacity: 0.9
+      }).addTo(map)
+    );
+  }
+  if (destCenter && data.access_to) {
+    const accessToPoint = [data.access_to.coordinates[1], data.access_to.coordinates[0]];
+    routePolylines.push(
+      L.polyline([accessToPoint, destCenter], {
+        color: '#f0c808', weight: 3, dashArray: '8, 8', opacity: 0.9
+      }).addTo(map)
+    );
+  }
+
+  // Origin marker (green play)
+  if (originCenter) {
+    routePolylines.push(
+      L.marker(originCenter, {
+        icon: L.divIcon({
+          className: 'route-marker-origin',
+          html: '<div style="background:#1a9850;color:white;border-radius:50%;width:28px;height:28px;display:flex;align-items:center;justify-content:center;font-size:14px;border:2px solid white;box-shadow:0 2px 6px rgba(0,0,0,0.3)">▶</div>',
+          iconSize: [28, 28], iconAnchor: [14, 14]
+        })
+      }).addTo(map)
+    );
+  }
+
+  // Destination marker (red pin)
+  if (destCenter) {
+    routePolylines.push(
+      L.marker(destCenter, {
+        icon: L.divIcon({
+          className: 'route-marker-dest',
+          html: '<div style="background:#d73027;color:white;border-radius:50% 50% 50% 0;width:28px;height:28px;display:flex;align-items:center;justify-content:center;font-size:12px;border:2px solid white;box-shadow:0 2px 6px rgba(0,0,0,0.3);transform:rotate(-45deg)"><span style="transform:rotate(45deg);display:block">📍</span></div>',
+          iconSize: [28, 28], iconAnchor: [14, 28]
+        })
+      }).addTo(map)
+    );
+  }
+
+  // Auto-zoom to fit entire route and both buildings
+  if (originCenter && destCenter) {
+    let routeBounds = L.latLngBounds([originCenter, destCenter]);
+    routePolylines.forEach(function(layer) {
+      if (typeof layer.getBounds === 'function') routeBounds.extend(layer.getBounds());
+    });
+    map.fitBounds(routeBounds, { padding: [50, 50] });
+  }
+}
+
 async function computeRoute(fromBid, toBid) {
   if (!currentDataset) return;
   clearRoute();
@@ -513,91 +664,29 @@ async function computeRoute(fromBid, toBid) {
     const data = await fetchJson(url);
 
     if (!data.found) {
-      setRouteStatus(`<strong>No route found</strong><br>${data.reason}`);
+      if (data.has_wet_route) {
+        setRouteStatus(
+          `<div style="text-align:center">` +
+          `<strong>No dry route found</strong><br>${data.reason}` +
+          `<br><button id="btn-show-wet-route" style="margin-top:8px;padding:5px 12px;` +
+          `background:#d73027;color:white;border:none;border-radius:6px;font-size:12px;` +
+          `font-family:inherit;cursor:pointer;">Show route anyway</button>` +
+          `</div>`
+        );
+        document.getElementById('btn-show-wet-route').addEventListener('click', function() {
+          this.remove();
+          renderResult(data);
+          _renderRouteGeometry(data, fromBid);
+        });
+      } else {
+        setRouteStatus(`<strong>No route found</strong><br>${data.reason}`);
+      }
       return;
     }
 
     setRouteStatus('');
     renderResult(data);
-
-    originHighlightBid = fromBid;
-    destHighlightBid   = data.to;
-    highlightBuilding(fromBid,  '#1a9850');
-    highlightBuilding(data.to,  '#d73027');
-
-    if (data.path_geojson && data.path_geojson.features.length > 0) {
-      const features = data.path_geojson.features;
-
-      for (const feature of features) {
-        if (!feature.geometry || !feature.geometry.coordinates) continue;
-
-        const latlngs = feature.geometry.coordinates.map(([lon, lat]) => [lat, lon]);
-        const color   = feature.properties.flooded ? '#d73027' : '#2563eb';
-
-        const polyline = L.polyline(latlngs, { color, weight: 4 }).addTo(map);
-        routePolylines.push(polyline);
-      }
-
-      const originCenter = getBuildingCenter(fromBid);
-      const destCenter   = getBuildingCenter(data.to);
-
-      // Yellow dashed access lines using backend-provided access node coordinates
-      if (originCenter && data.access_from) {
-        const accessFromPoint = [data.access_from.coordinates[1], data.access_from.coordinates[0]];
-        routePolylines.push(
-          L.polyline([originCenter, accessFromPoint], {
-            color: '#f0c808', weight: 3, dashArray: '8, 8', opacity: 0.9
-          }).addTo(map)
-        );
-      }
-      if (destCenter && data.access_to) {
-        const accessToPoint = [data.access_to.coordinates[1], data.access_to.coordinates[0]];
-        routePolylines.push(
-          L.polyline([accessToPoint, destCenter], {
-            color: '#f0c808', weight: 3, dashArray: '8, 8', opacity: 0.9
-          }).addTo(map)
-        );
-      }
-
-      // Origin marker (green play)
-      if (originCenter) {
-        routePolylines.push(
-          L.marker(originCenter, {
-            icon: L.divIcon({
-              className: 'route-marker-origin',
-              html: '<div style="background:#1a9850;color:white;border-radius:50%;width:28px;height:28px;display:flex;align-items:center;justify-content:center;font-size:14px;border:2px solid white;box-shadow:0 2px 6px rgba(0,0,0,0.3)">▶</div>',
-              iconSize: [28, 28],
-              iconAnchor: [14, 14]
-            })
-          }).addTo(map)
-        );
-      }
-
-      // Destination marker (red pin)
-      if (destCenter) {
-        routePolylines.push(
-          L.marker(destCenter, {
-            icon: L.divIcon({
-              className: 'route-marker-dest',
-              html: '<div style="background:#d73027;color:white;border-radius:50% 50% 50% 0;width:28px;height:28px;display:flex;align-items:center;justify-content:center;font-size:12px;border:2px solid white;box-shadow:0 2px 6px rgba(0,0,0,0.3);transform:rotate(-45deg)"><span style="transform:rotate(45deg);display:block">📍</span></div>',
-              iconSize: [28, 28],
-              iconAnchor: [14, 28]
-            })
-          }).addTo(map)
-        );
-      }
-
-      // Auto-zoom to fit entire route and both buildings
-      if (originCenter && destCenter) {
-        let routeBounds = L.latLngBounds([originCenter, destCenter]);
-        routePolylines.forEach(function(layer) {
-          if (typeof layer.getBounds === 'function') {
-            routeBounds.extend(layer.getBounds());
-          }
-        });
-        map.fitBounds(routeBounds, { padding: [50, 50] });
-      }
-    }
+    _renderRouteGeometry(data, fromBid);
   } catch (err) {
     setRouteStatus(`<span style="color:red">Error: ${err.message}</span>`);
   }

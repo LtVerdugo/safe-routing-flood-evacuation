@@ -12,6 +12,7 @@
 #   ...
 # }
 
+import math
 from pathlib import Path
 
 import numpy as np
@@ -52,7 +53,7 @@ def load_all_datasets(base_dir="datasets"):
         print(f"[cache] Datasets directory not found: {base_dir} — no datasets loaded.")
         return
 
-    candidates = sorted(d for d in base_path.iterdir() if d.is_dir() and (d / "G.pkl").exists())
+    candidates = sorted(d for d in base_path.iterdir() if d.is_dir() and (d / "G.pkl").exists() and not d.name.startswith('_'))
 
     if not candidates:
         print(f"[cache] No datasets found in {base_dir}.")
@@ -76,7 +77,11 @@ def add_dataset(name, G, buildings_gdf, flood_gdf):
     flood_wgs84 = (
         flood_gdf.to_crs(WGS84_CRS) if flood_gdf.crs is not None else flood_gdf
     )
-    bbox = [float(x) for x in flood_wgs84.total_bounds]  # [minx, miny, maxx, maxy] WGS84
+    _flood_bounds = flood_wgs84.total_bounds  # array([nan, nan, nan, nan]) si vacío
+    if len(flood_wgs84) > 0 and not any(math.isnan(v) for v in _flood_bounds):
+        bbox = [float(x) for x in _flood_bounds]
+    else:
+        bbox = [float(x) for x in buildings_wgs84.total_bounds]
 
     # Pre-serialize GeoJSON strings once so endpoints can return them directly.
     print(f"[cache] Pre-serializing GeoJSON for '{name}' …")
