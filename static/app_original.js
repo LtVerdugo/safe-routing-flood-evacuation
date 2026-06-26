@@ -108,6 +108,7 @@ map.on('click', async function(e) {
       `<div style="font-size:12px;color:#1a1a1a;font-family:monospace">${lat}, ${lon}</div>`;
   }
 
+  document.getElementById('depth-panel-title').textContent = 'Water depth';
   panel.style.display = 'flex';
 
   closeBtn.onclick = function() {
@@ -320,7 +321,8 @@ function renderBuildings(geojson) {
     style:    getBuildingStyle,
     renderer: L.canvas(),
     onEachFeature: function (feature, layer) {
-      layer.on('click', function () {
+      layer.on('click', function (e) {
+        L.DomEvent.stopPropagation(e);
         onBuildingSelected(feature.properties.bid, feature.properties.flood_status);
       });
     },
@@ -570,13 +572,81 @@ function onBuildingSelected(bid, floodStatus) {
     resetInput('dest');
     if (floodStatus) updateSlotStyle('origin', floodStatus);
     setSelectionMode('dest');
+    _renderBuildingPanel(_getBuildingProps(bid), null, null);
   } else {
     if (bid === originBid) return;
     setInputFilled('dest', bid);
     setSelectionMode(null);
+    _renderBuildingPanel(_getBuildingProps(originBid), _getBuildingProps(bid), null);
     computeRoute(originBid, bid);
   }
   updatePanelState();
+}
+
+function _getBuildingProps(bid) {
+  if (!buildingsLayer || !bid) return null;
+  let props = null;
+  buildingsLayer.eachLayer(function(layer) {
+    if (!props && layer.feature && layer.feature.properties.bid === bid) {
+      props = layer.feature.properties;
+    }
+  });
+  return props;
+}
+
+function _renderBuildingPanel(originData, destData, routeData) {
+  const STATUS_CONFIG = {
+    drowned:  { emoji: '🔴', label: 'Drowned',  color: '#d73027' },
+    close_to: { emoji: '🟠', label: 'Close to', color: '#f46d43' },
+    at_risk:  { emoji: '🟡', label: 'At risk',  color: '#b8860b' },
+    safe:     { emoji: '🟢', label: 'Safe',     color: '#1a9850' },
+  };
+
+  function buildingCard(title, data) {
+    if (!data) return '';
+    const s = STATUS_CONFIG[data.flood_status] || { emoji: '⚪', label: data.flood_status || '—', color: '#999' };
+    const depthRows = (data.flood_status === 'drowned' && data.depth_max_m != null)
+      ? `<div style="display:flex;justify-content:space-between;margin-bottom:5px">` +
+          `<span style="font-size:12px;color:#666">Max depth</span>` +
+          `<span style="font-size:12px;color:#1a1a1a">${(+data.depth_max_m).toFixed(2)} m</span></div>` +
+        `<div style="display:flex;justify-content:space-between;margin-bottom:5px">` +
+          `<span style="font-size:12px;color:#666">Mean depth</span>` +
+          `<span style="font-size:12px;color:#1a1a1a">${(+data.depth_mean_m).toFixed(2)} m</span></div>`
+      : '';
+    return `<div style="margin-bottom:12px">` +
+        `<div style="font-size:10px;font-weight:600;color:#999;letter-spacing:0.07em;text-transform:uppercase;margin-bottom:8px">${title}</div>` +
+        `<div style="display:flex;justify-content:space-between;margin-bottom:5px"><span style="font-size:12px;color:#666">ID</span><span style="font-size:11px;color:#1a1a1a;font-family:monospace">${data.bid}</span></div>` +
+        `<div style="display:flex;justify-content:space-between;margin-bottom:5px"><span style="font-size:12px;color:#666">Type</span><span style="font-size:12px;color:#1a1a1a">${(data.building_type === 'yes' ? 'Unknown' : data.building_type) || '—'}</span></div>` +
+        `<div style="display:flex;justify-content:space-between;margin-bottom:5px"><span style="font-size:12px;color:#666">Status</span><span style="font-size:12px;color:${s.color};font-weight:600">${s.emoji} ${s.label}</span></div>` +
+        depthRows +
+      `</div><div style="height:1px;background:#f0f0f0;margin-bottom:12px"></div>`;
+  }
+
+  const pendingDest = originData && !destData
+    ? `<div style="font-size:12px;color:#aaa;margin-bottom:12px;font-style:italic">Select a destination building</div>`
+    : '';
+
+  let routeHtml = '';
+  if (routeData) {
+    const dist = routeData.total_cost != null ? `${Math.round(routeData.total_cost)} m` : '—';
+    const floodColor  = routeData.flooded_segments > 0 ? '#d73027' : '#1a1a1a';
+    const floodWeight = routeData.flooded_segments > 0 ? '600' : '400';
+    routeHtml =
+      `<div style="font-size:10px;font-weight:600;color:#999;letter-spacing:0.07em;text-transform:uppercase;margin-bottom:8px">Route summary</div>` +
+      `<div style="display:flex;justify-content:space-between;margin-bottom:5px"><span style="font-size:12px;color:#666">Distance</span><span style="font-size:12px;color:#1a1a1a">${dist}</span></div>` +
+      `<div style="display:flex;justify-content:space-between;margin-bottom:5px"><span style="font-size:12px;color:#666">Road segments</span><span style="font-size:12px;color:#1a1a1a">${routeData.road_segments}</span></div>` +
+      `<div style="display:flex;justify-content:space-between;margin-bottom:5px"><span style="font-size:12px;color:#666">Flooded segments</span><span style="font-size:12px;color:${floodColor};font-weight:${floodWeight}">${routeData.flooded_segments}</span></div>`;
+  }
+
+  document.getElementById('depth-panel-content').innerHTML =
+    buildingCard('Origin building', originData) + pendingDest +
+    buildingCard('Destination building', destData) + routeHtml;
+
+  const panel    = document.getElementById('depth-panel');
+  const closeBtn = document.getElementById('btn-close-depth-panel');
+  document.getElementById('depth-panel-title').textContent = 'Building info';
+  panel.style.display = 'flex';
+  closeBtn.onclick = function() { panel.style.display = 'none'; };
 }
 
 function _renderRouteGeometry(data, fromBid) {
@@ -687,6 +757,7 @@ async function computeRoute(fromBid, toBid) {
     setRouteStatus('');
     renderResult(data);
     _renderRouteGeometry(data, fromBid);
+    _renderBuildingPanel(_getBuildingProps(fromBid), _getBuildingProps(data.to), data);
   } catch (err) {
     setRouteStatus(`<span style="color:red">Error: ${err.message}</span>`);
   }
@@ -776,6 +847,7 @@ document.getElementById('btn-clear').addEventListener('click', function () {
   resetInput('origin');
   resetInput('dest');
   updatePanelState();
+  document.getElementById('depth-panel').style.display = 'none';
 });
 
 // ---------------------------------------------------------------------------

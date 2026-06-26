@@ -86,7 +86,7 @@ def add_dataset(name, G, buildings_gdf, flood_gdf):
     # Pre-serialize GeoJSON strings once so endpoints can return them directly.
     print(f"[cache] Pre-serializing GeoJSON for '{name}' …")
     buildings_geojson = _gdf_to_geojson_str(
-        buildings_wgs84, ["bid", "flood_status", "building_type"]
+        buildings_wgs84, ["bid", "flood_status", "building_type", "depth_max_m", "depth_mean_m"]
     )
 
     # Simplify flood geometries for browser display — 0.0001° ≈ 8 m at German latitudes.
