@@ -3,7 +3,7 @@
 A graph-based web application for computing safe evacuation routes under flood conditions in urban environments. Built on OpenStreetMap road network data and Copernicus flood extent data.
 
 ## Case study
-Kremmen and Oranienburg, Brandenburg, Germany — January 2024 flood event.
+Kremmen and Oranienburg, Brandenburg, Germany. January 2024 flood event.
 
 ## Features
 - Interactive map with buildings classified by flood exposure (drowned, close to flood, at risk, safe)
@@ -70,10 +70,7 @@ server {
 ```
 
 ### Dataset files
-The dataset files are not included in this repository due to their size (~476MB).
-Download the Brandenburg dataset from Google Drive and place it under `datasets/brandenburg/`:
-
-[Download dataset →](https://drive.google.com/drive/folders/10sW6YThdI_08FfQj6Mug9D2-thbJdlkx?usp=sharing)
+The dataset files are not included in this repository due to their size (~476MB). Contact the authors for access to the Brandenburg dataset.
 
 Expected structure:
 ```
@@ -85,11 +82,11 @@ datasets/
 ```
 
 ## Data sources
-- Flood extent: Copernicus Emergency Management Service — EMSN068 Brandenburg
+- Flood extent: Copernicus Emergency Management Service (EMSN068 Brandenburg)
 - Buildings and road network: OpenStreetMap via Geofabrik
 
 ## Related project
-[Flood Vulnerability Assessment and Evacuation Routing — Wilhelmsburg, Hamburg](https://experience.arcgis.com/experience/15a21125075b4af38a40f5298a32d20a)
+[Flood Vulnerability Assessment and Evacuation Routing: Wilhelmsburg, Hamburg](https://experience.arcgis.com/experience/15a21125075b4af38a40f5298a32d20a)
 
 ## License
 Academic use only. HafenCity Universität Hamburg.

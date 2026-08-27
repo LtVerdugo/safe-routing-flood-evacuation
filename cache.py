@@ -1,16 +1,18 @@
 # In-memory cache for loaded datasets.
-# Structure:
+# Structure (see add_dataset() below for what's actually stored):
 # CACHE = {
 #   "brandenburg": {
 #       "G":                <networkx.Graph>,
-#       "buildings":        <GeoDataFrame EPSG:4326>,
-#       "flood":            <GeoDataFrame EPSG:4326>,
 #       "bbox":             [minx, miny, maxx, maxy] WGS84,
 #       "buildings_geojson": <str>,   # pre-built FeatureCollection JSON
 #       "flood_geojson":     <str>,   # pre-built FeatureCollection JSON
+#       "safe_kdtree":       <scipy.spatial.KDTree | None>,  # over safe building centroids
+#       "safe_bids":         <list[str]>,  # building ids, same order as safe_kdtree's points
 #   },
 #   ...
 # }
+# Note: the GeoDataFrames themselves (buildings_wgs84, flood_wgs84) are not
+# kept in CACHE — only their pre-serialized GeoJSON strings are.
 
 import math
 from pathlib import Path
@@ -89,7 +91,11 @@ def add_dataset(name, G, buildings_gdf, flood_gdf):
         buildings_wgs84, ["bid", "flood_status", "building_type", "depth_max_m", "depth_mean_m"]
     )
 
-    # Simplify flood geometries for browser display — 0.0001° ≈ 8 m at German latitudes.
+    # Simplify flood geometries for browser display — 0.00001° ≈ 1 m at German
+    # latitudes. Intentionally fine-grained: the flood-boundary contour keeps
+    # geometric precision, at the cost of a heavier flood_geojson payload and
+    # slower simplify() at load time (measured ~1.8x vertex reduction vs. a
+    # coarser 0.0001° tolerance, which would give ~13x but blur the contour).
     # preserve_topology=False is fast and acceptable for visual-only polygons.
     flood_display = flood_wgs84.copy()
     flood_display.geometry = flood_wgs84.geometry.simplify(0.00001, preserve_topology=False)

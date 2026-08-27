@@ -1,4 +1,4 @@
-# Deployment Guide — Flood Evacuation Routing
+# Deployment Guide: Flood Evacuation Routing
 
 ## Steps
 
@@ -46,5 +46,5 @@ gunicorn --workers 1 --bind 0.0.0.0:5000 --timeout 120 wsgi:app
 
 ### 7. Verify
 ```bash
-curl https://www.cml.hcu-hamburg.de/demos/flood-evacuation/healthz
+curl https://your-domain.com/demos/flood-evacuation/healthz
 ```

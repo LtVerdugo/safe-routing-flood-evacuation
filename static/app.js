@@ -16,6 +16,12 @@ const STATUS_COLORS = {
   safe:     '#1a9850'
 };
 
+const PASSABILITY_COLORS = {
+  passable:      '#1a9850',
+  passable_slow: '#fc8d59',
+  impassable:    '#d73027'
+};
+
 const SLOT_COLORS = {
   drowned:  { border: '#d73027', bg: '#fff5f5' },
   close_to: { border: '#fc8d59', bg: '#fff8f5' },
@@ -330,7 +336,9 @@ async function toggleRoute(type) {
     for (const feature of data.path_geojson.features) {
       if (!feature.geometry?.coordinates) continue;
       const latlngs = feature.geometry.coordinates.map(([lon, lat]) => [lat, lon]);
-      const segColor = feature.properties.flooded ? '#d73027' : color;
+      const segColor = !feature.properties.flooded
+        ? color
+        : (PASSABILITY_COLORS[feature.properties.passability] || '#d73027');
       newPolylines.push(L.polyline(latlngs, { color: segColor, weight: 5 }).addTo(map));
     }
 
@@ -399,7 +407,10 @@ async function init() {
   if (document.getElementById('toggle-flood').checked) floodLayer.addTo(map);
 
   floodedSegmentsLayer = L.geoJSON(floodedData, {
-    style: { color: '#d73027', weight: 2, opacity: 0.8 }
+    style: function(feature) {
+      const color = PASSABILITY_COLORS[feature.properties.passability] || '#d73027';
+      return { color: color, weight: 2, opacity: 0.8 };
+    }
   });
   if (document.getElementById('toggle-flooded-segments').checked) floodedSegmentsLayer.addTo(map);
 

@@ -376,6 +376,42 @@
       font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
     }
     #btn-how-to-use:hover { background: #1a1a1a; }
+
+    /* Mode chooser modal */
+    #mode-chooser-overlay {
+      position: fixed; inset: 0;
+      background: rgba(33, 33, 33, 0.32);
+      z-index: 2100;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    #mode-chooser-modal {
+      width: 420px;
+      background: #fff;
+      border: 1px solid #e0e0e0;
+      border-radius: 6px;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    }
+    #mode-chooser-modal .mc-header { padding: 16px 18px 14px; border-bottom: 1px solid #eeeeee; }
+    #mode-chooser-modal .mc-title { font-size: 14px; font-weight: 600; color: #1a1a1a; }
+    #mode-chooser-modal .mc-subtitle { margin-top: 6px; font-size: 12px; color: #9e9e9e; line-height: 1.5; }
+    #mode-chooser-modal .mc-body { padding: 14px 18px 16px; display: flex; flex-direction: column; gap: 8px; }
+    #mode-chooser-modal .mc-label { font-size: 11px; letter-spacing: 0.8px; text-transform: uppercase; color: #9e9e9e; }
+    .mc-option {
+      text-align: left; font: inherit; width: 100%;
+      border-radius: 0 4px 4px 0; padding: 11px 12px; cursor: pointer;
+    }
+    .mc-option-title { display: flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 600; color: #212121; }
+    .mc-option-desc { margin-top: 5px; font-size: 11.5px; color: #757575; line-height: 1.5; }
+    #btn-choose-pedestrian { background: #f9f9f9; border: 1px solid #eeeeee; border-left: 4px solid #e0e0e0; }
+    #btn-choose-pedestrian:hover { background: #f2f2f2; }
+    #btn-choose-vehicle { background: #fffbea; border: 1px solid #f2ecd0; border-left: 4px solid #e8c419; }
+    #btn-choose-vehicle:hover { background: #fdf7e0; }
+    .mc-new-badge {
+      margin-left: auto; font-size: 10.5px; letter-spacing: 0.5px; text-transform: uppercase;
+      color: #0F6E56; background: #E1F5EE; padding: 2px 8px; border-radius: 20px;
+    }
   </style>
 </head>
 <body>
@@ -411,7 +447,41 @@
 <!-- Floating help button -->
 <button id="btn-how-to-use">How to use</button>
 
+<!-- Mode chooser modal -->
+<div id="mode-chooser-overlay">
+  <div id="mode-chooser-modal">
+    <div class="mc-header">
+      <div class="mc-title">Which mode do you want to use?</div>
+      <div class="mc-subtitle">You can switch modes anytime from the sidebar.</div>
+    </div>
+    <div class="mc-body">
+      <div class="mc-label">Available modes</div>
+      <button id="btn-choose-pedestrian" class="mc-option">
+        <div class="mc-option-title">
+          <span style="width:8px;height:8px;border-radius:50%;background:#9e9e9e;"></span>
+          Normal mode
+          <span style="margin-left:auto;font-size:10.5px;letter-spacing:0.5px;text-transform:uppercase;color:#9e9e9e;">Pedestrian</span>
+        </div>
+        <div class="mc-option-desc">Pedestrian evacuation routing. Same as always: dataset, origin/destination, layers, and building exposure.</div>
+      </button>
+      <button id="btn-choose-vehicle" class="mc-option">
+        <div class="mc-option-title">
+          <span style="width:8px;height:8px;border-radius:50%;background:#e8c419;"></span>
+          Emergency vehicle mode
+          <span class="mc-new-badge">New</span>
+        </div>
+        <div class="mc-option-desc">Routing by vehicle fording depth (street chassis, HLF 4x4, Unimog), analysis by distance or time, and comparison across all 3 vehicles.</div>
+      </button>
+    </div>
+  </div>
+</div>
+
   <div id="map"></div>
+
+  <div id="compare-legend" style="display:none; position:absolute; bottom:18px; left:320px; z-index:600; background:#fff; border:1px solid #e0e0e0; border-radius:4px; padding:10px 14px 11px;">
+    <div style="font-size:11px; letter-spacing:0.8px; text-transform:uppercase; color:#9e9e9e; margin-bottom:8px;">Route comparison</div>
+    <div id="compare-legend-rows" style="display:flex; gap:18px;"></div>
+  </div>
 
   <div id="sidebar">
 
@@ -437,6 +507,10 @@
         cursor: pointer;
         text-align: center;
       ">🔵 Compare river flood scenarios</button>
+    </div>
+
+    <div id="btn-change-mode-wrap" style="padding: 10px 16px 0; display:none;">
+      <button id="btn-change-mode" style="width:100%; font:inherit; font-size:11px; letter-spacing:0.3px; color:#616161; background:#fafafa; border:1px solid #e0e0e0; border-radius:4px; padding:6px 8px; cursor:pointer; text-align:left;">← Change mode</button>
     </div>
 
     <!-- ── Compare panel (hidden by default) ──────────────────────────────── -->
@@ -493,6 +567,7 @@
                placeholder="Click a building to set origin"
                autocomplete="off" />
       </div>
+      <div id="origin-input-error" style="display:none; margin-top:6px; font-size:11px; color:#d73027; line-height:1.4;"></div>
 
       <div class="slot-connector"></div>
 
@@ -501,6 +576,23 @@
         <input type="text" id="dest-input"
                placeholder="Click a building to set destination"
                autocomplete="off" />
+      </div>
+      <div id="dest-input-error" style="display:none; margin-top:6px; font-size:11px; color:#d73027; line-height:1.4;"></div>
+
+      <div id="vehicle-mode-only" style="display:none;">
+        <div style="margin-top: 14px;">
+          <div class="section-label">Vehicle</div>
+          <select id="vehicle-select" style="width:100%; font:inherit; font-size:12.5px; color:#424242; background:#fafafa; border:1px solid #e0e0e0; border-radius:6px; padding:7px 8px;"></select>
+          <div id="vehicle-note" style="margin-top:7px; font-size:11px; color:#9e9e9e; line-height:1.45;"></div>
+        </div>
+        <div style="margin-top: 14px;">
+          <div class="section-label">Analysis method</div>
+          <div style="display:flex; gap:0; border:1px solid #e0e0e0; border-radius:6px; overflow:hidden;">
+            <button id="btn-analysis-distance" style="flex:1 1 0; font:inherit; font-size:12px; padding:7px 6px; border:none; cursor:pointer;">Distance</button>
+            <div style="width:1px; background:#e0e0e0;"></div>
+            <button id="btn-analysis-time" style="flex:1 1 0; font:inherit; font-size:12px; padding:7px 6px; border:none; cursor:pointer;">Time</button>
+          </div>
+        </div>
       </div>
     </div>
 
@@ -531,6 +623,18 @@
         </div>
       </div>
       <div id="directions-list"></div>
+      <label class="toggle-row" style="margin-top:8px; border-top:1px solid #f0f0f0; padding-top:10px;">
+        Route detail
+        <input type="checkbox" id="toggle-route-detail" />
+      </label>
+      <div id="btn-compare-vehicles-wrap" style="display:none; margin-top:12px;">
+        <button id="btn-compare-vehicles" style="width:100%; font:inherit; font-size:12.5px; color:#616161; background:#fafafa; border:1px solid #e0e0e0; border-radius:4px; padding:8px 10px; cursor:pointer;">Compare with the other 2 vehicles</button>
+      </div>
+    </div>
+
+    <div id="compare-vehicles-section" style="display:none; padding:14px 16px 15px; border-bottom:1px solid #eeeeee;">
+      <div class="section-label">Comparison by vehicle</div>
+      <div id="compare-vehicles-cards" style="display:flex; flex-direction:column; gap:6px;"></div>
     </div>
 
     <hr class="sidebar-divider" />

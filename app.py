@@ -88,6 +88,41 @@ def _reproject_linestring(geom):
     return [list(_transformer.transform(x, y)) for x, y in geom.coords]
 
 
+def _resolve_passability(edge_data):
+    """Return the edge's passability category.
+
+    Only datasets with a computed depth-profile passability scheme (currently
+    just new_raster_depth_heimfeld) carry a `passability` attribute — its
+    three values (passable / passable_slow / impassable) and the 0.20m/0.50m
+    depth thresholds behind them come from that external pipeline and are
+    not replicated here. Every other dataset only has the boolean `flooded`
+    attribute, so for those we derive a safe two-way fallback from it instead
+    of defaulting to "passable" outright, which previously rendered flooded
+    edges green.
+    """
+    passability = edge_data.get("passability")
+    if passability is not None:
+        return passability
+    return "impassable" if edge_data.get("flooded", False) else "passable"
+
+
+_VEHICLE_PROFILES = ("normal", "emergencia_chasis_calle", "emergencia_hlf_4x4", "emergencia_unimog")
+
+
+def _vehicle_available(G, weight_attr):
+    """Return whether this graph carries the requested vehicular cost attribute.
+
+    The 8 cost_dist_*/cost_time_* attributes are all-or-nothing across every
+    edge of a given graph — either every edge has all 8 (e.g.
+    new_raster_depth_heimfeld_EMG_Car) or none of them do (every other
+    dataset today, which only has the pedestrian `routing_cost`). Sampling a
+    single edge is therefore sufficient and avoids scanning the whole graph
+    on every request.
+    """
+    _, _, sample_data = next(iter(G.edges(data=True)), (None, None, {}))
+    return weight_attr in sample_data
+
+
 def _bearing(p1, p2):
     """Compass bearing in degrees [0, 360) from p1=[lon,lat] to p2=[lon,lat] (WGS84)."""
     lat1 = math.radians(p1[1])
@@ -217,12 +252,19 @@ def _compute_directions(path_geojson, dest_lonlat=None, access_from_lonlat=None)
     return directions
 
 
-def find_emergency_route(G, from_bid, kdtree=None, safe_bids=None):
+def find_emergency_route(G, from_bid, kdtree=None, safe_bids=None,
+                          weight_attr="routing_cost", is_time_weighted=False):
     """Find nearest safe building.
 
     If a KDTree is provided, probe the k nearest safe buildings with A* and
     return the cheapest reachable one.  Falls back to full Dijkstra when the
     KDTree is unavailable or all candidates are unreachable.
+
+    weight_attr selects the edge attribute used as routing cost — defaults to
+    the pedestrian "routing_cost" for backward compatibility; vehicle routing
+    passes one of the cost_dist_*/cost_time_* attributes instead. Callers must
+    pass is_time_weighted explicitly (not inferred from weight_attr's name —
+    see heuristic() below) whenever weight_attr is a cost_time_* attribute.
     """
     if kdtree is not None and safe_bids:
         from_data = G.nodes[from_bid]
@@ -238,6 +280,11 @@ def find_emergency_route(G, from_bid, kdtree=None, safe_bids=None):
             idxs = [idxs]
 
         def heuristic(u, v):
+            # Euclidean distance in metres is only admissible when weight_attr
+            # is itself in metres. When it's a time-based attribute (seconds),
+            # fall back to 0 — A* degrades to Dijkstra, fine at this graph size.
+            if is_time_weighted:
+                return 0
             u_d = G.nodes[u]; v_d = G.nodes[v]
             return ((u_d.get('x', 0) - v_d.get('x', 0)) ** 2 +
                     (u_d.get('y', 0) - v_d.get('y', 0)) ** 2) ** 0.5
@@ -246,8 +293,8 @@ def find_emergency_route(G, from_bid, kdtree=None, safe_bids=None):
         for idx in idxs:
             target = safe_bids[idx]
             try:
-                path = nx.astar_path(G, from_bid, target, heuristic=heuristic, weight="routing_cost")
-                cost = nx.path_weight(G, path, weight="routing_cost")
+                path = nx.astar_path(G, from_bid, target, heuristic=heuristic, weight=weight_attr)
+                cost = nx.path_weight(G, path, weight=weight_attr)
                 if cost < best_cost:
                     best_path, best_cost = path, cost
             except (nx.NetworkXNoPath, nx.NodeNotFound):
@@ -277,7 +324,7 @@ def find_emergency_route(G, from_bid, kdtree=None, safe_bids=None):
 
         for neighbor in G.neighbors(node):
             edge_data = G.get_edge_data(node, neighbor)
-            edge_cost = edge_data.get("routing_cost", float("inf"))
+            edge_cost = edge_data.get(weight_attr, float("inf"))
             if edge_cost == float("inf"):
                 continue
             new_cost = cost + edge_cost
@@ -348,7 +395,8 @@ def api_flooded_segments():
             "geometry": {"type": "LineString", "coordinates": coords},
             "properties": {
                 "length": data.get("length", 0),
-                "depth_m": data.get("depth_m", 0.0)
+                "depth_m": data.get("depth_m", 0.0),
+                "passability": _resolve_passability(data)
             }
         })
 
@@ -364,9 +412,15 @@ def api_raster():
     This is intentional I/O in a request handler — the file is not cached in RAM
     because COGs can be several hundred MB and are only needed by this endpoint.
     """
+    # Validate against the known dataset names (cache.py only ever populates
+    # CACHE with directory basenames discovered under _BASE_DIR at startup —
+    # see cache.load_all_datasets) instead of trusting the raw query param,
+    # which would otherwise let an absolute path or "../" traversal in
+    # `dataset` escape _BASE_DIR entirely.
+    _, err = _require_dataset()
+    if err:
+        return err
     name = request.args.get("dataset")
-    if not name:
-        return jsonify({"error": "dataset parameter required"}), 400
 
     dataset_dir = Path(_BASE_DIR) / name
     if not dataset_dir.exists():
@@ -384,8 +438,15 @@ def api_raster():
         try:
             byte_range = range_header.split("=", 1)[1]
             parts = byte_range.split("-")
-            start = int(parts[0]) if parts[0] else 0
-            end   = int(parts[1]) if len(parts) > 1 and parts[1] else file_size - 1
+            if parts[0] == "":
+                # Suffix-length form per RFC 7233 §2.1, e.g. "bytes=-500"
+                # means "the final 500 bytes", not "start at byte 0".
+                suffix_length = int(parts[1])
+                start = max(0, file_size - suffix_length)
+                end   = file_size - 1
+            else:
+                start = int(parts[0])
+                end   = int(parts[1]) if len(parts) > 1 and parts[1] else file_size - 1
         except (ValueError, IndexError):
             return Response("Bad Range header", status=416)
 
@@ -445,6 +506,17 @@ def api_route():
         if not from_bid:
             return jsonify({"error": "from parameter required"}), 400
 
+        # Vehicle routing — both params optional, pure request-shape checks
+        # that don't need the graph yet. `optimize` is validated whenever it
+        # is present, regardless of `vehicle`: a malformed value is a
+        # malformed request even on a request where it would have no effect.
+        vehicle  = request.args.get("vehicle")
+        optimize = request.args.get("optimize", "distance")
+        if optimize not in ("distance", "time"):
+            return jsonify({"error": "optimize must be 'distance' or 'time'"}), 400
+        if vehicle is not None and vehicle not in _VEHICLE_PROFILES:
+            return jsonify({"error": f"unknown vehicle profile '{vehicle}'"}), 400
+
         G = ds["G"]
 
         if from_bid not in G:
@@ -453,9 +525,28 @@ def api_route():
         if to_bid and to_bid not in G:
             return jsonify({"error": f"node '{to_bid}' not found in graph"}), 404
 
+        # Resolve which edge attribute to route on. Absent `vehicle`, this is
+        # exactly the pre-existing pedestrian behaviour ("routing_cost"),
+        # untouched. is_time_weighted is computed explicitly here — not
+        # inferred later from weight_attr's string shape — so heuristic()
+        # below and find_emergency_route() don't couple heuristic behaviour
+        # to a naming convention that could change without this being updated.
+        is_time_weighted = vehicle is not None and optimize == "time"
+        if vehicle is not None:
+            weight_attr = f"cost_{'time' if optimize == 'time' else 'dist'}_{vehicle}"
+        else:
+            weight_attr = "routing_cost"
+
+        if vehicle is not None and not _vehicle_available(G, weight_attr):
+            return jsonify({"error": "vehicle routing not available for this dataset"}), 400
+
         # A* heuristic: euclidean distance in EPSG:25832 metres.
         # Road nodes carry x/y; building and flood nodes do not — return 0 for those.
+        # Also 0 whenever weight_attr is a time-based attribute (seconds) —
+        # metres is not an admissible heuristic for a cost measured in time.
         def heuristic(u, v):
+            if is_time_weighted:
+                return 0
             u_data = G.nodes[u]
             v_data = G.nodes[v]
             ux, uy = u_data.get("x", 0), u_data.get("y", 0)
@@ -465,8 +556,8 @@ def api_route():
         if to_bid:
             # Direct A* to the caller-specified destination.
             try:
-                best_path     = nx.astar_path(G, from_bid, to_bid, heuristic=heuristic, weight="routing_cost")
-                best_cost     = nx.path_weight(G, best_path, weight="routing_cost")
+                best_path     = nx.astar_path(G, from_bid, to_bid, heuristic=heuristic, weight=weight_attr)
+                best_cost     = nx.path_weight(G, best_path, weight=weight_attr)
                 has_wet_route = best_cost == float("inf")
                 best_target   = to_bid
             except (nx.NetworkXNoPath, nx.NodeNotFound):
@@ -475,7 +566,10 @@ def api_route():
             has_wet_route = False
             kdtree    = ds.get("safe_kdtree")
             safe_bids = ds.get("safe_bids", [])
-            best_path, best_cost = find_emergency_route(G, from_bid, kdtree, safe_bids)
+            best_path, best_cost = find_emergency_route(
+                G, from_bid, kdtree, safe_bids,
+                weight_attr=weight_attr, is_time_weighted=is_time_weighted,
+            )
             if best_path is None:
                 return jsonify({"found": False, "reason": "no path to safe building"})
             best_target = best_path[-1]
@@ -517,6 +611,7 @@ def api_route():
                     "flooded": edge_data.get("flooded", False),
                     "length": edge_data.get("length", 0),
                     "depth_m": edge_data.get("depth_m", 0.0),
+                    "passability": _resolve_passability(edge_data),
                 },
             })
 
