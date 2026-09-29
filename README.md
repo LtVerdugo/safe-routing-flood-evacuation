@@ -19,7 +19,7 @@ Kremmen and Oranienburg, Brandenburg, Germany. January 2024 flood event.
 | Routing | NetworkX, A* algorithm |
 | Spatial | GeoPandas, Shapely, SciPy |
 | Frontend | HTML, CSS, JavaScript, Leaflet 1.7.1 |
-| Map tiles | CartoDB Positron |
+| Map tiles | Esri World Light Gray Canvas |
 
 ## Deployment
 

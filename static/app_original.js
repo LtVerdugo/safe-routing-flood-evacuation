@@ -202,10 +202,18 @@ const map = L.map('map', { zoomControl: false }).setView([52.5, 13.4], 10);
 
 L.control.zoom({ position: 'topright' }).addTo(map);
 
-L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}' + (L.Browser.retina ? '@2x.png' : '.png'), {
-  attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>',
-  subdomains: 'abcd',
+const ESRI_LIGHT_GRAY_ATTRIBUTION = 'Tiles &copy; Esri &mdash; Esri, HERE, Garmin, FAO, NOAA, USGS, &copy; OpenStreetMap contributors, and the GIS community';
+
+L.tileLayer('https://services.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Light_Gray_Base/MapServer/tile/{z}/{y}/{x}', {
+  attribution: ESRI_LIGHT_GRAY_ATTRIBUTION,
+  maxNativeZoom: 16,
   maxZoom: 20
+}).addTo(map);
+
+L.tileLayer('https://services.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Light_Gray_Reference/MapServer/tile/{z}/{y}/{x}', {
+  maxNativeZoom: 16,
+  maxZoom: 20,
+  pane: 'overlayPane'
 }).addTo(map);
 
 map.on('click', async function(e) {
